@@ -2,8 +2,7 @@ name: build-and-deploy
 
 on:
   schedule:
-    # 每天检查一次数据源是否更新（UTC）
-    - cron: "0 4,16 * * *"
+    - cron: "0 4,10,16 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -11,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 jobs:
@@ -133,3 +132,11 @@ jobs:
         with:
           path: .cache/zmh-index
           key: zmh-index-manifest-${{ github.ref_name }}-${{ steps.data.outputs.generated_at }}-${{ github.run_id }}
+          
+      - name: keep action alive
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          workflow_id=$(gh api repos/${{ github.repository }}/actions/workflows --jq '.workflows[] | select(.name == "${{ github.workflow }}") | .id')
+          gh api -X PUT "repos/${{github.repository}}/actions/workflows/${workflow_id}/enable"
