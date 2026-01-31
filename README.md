@@ -52,6 +52,8 @@ npm run build:all
 
 构建产物位于 `dist/`，可直接部署到任意静态托管（Pages/Vercel/Netlify/GitHub Pages 等）。
 
+> 性能：构建完成后会对 `dist/assets/*.bin` 写入 gzip 压缩内容；在 Cloudflare Pages 通过 `_headers` 设置 `Content-Encoding: gzip`，浏览器会自动解压后交给前端使用。
+
 ## 更新数据
 
 替换 SQLite 文件后重新执行：

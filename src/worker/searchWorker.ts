@@ -154,12 +154,29 @@ async function fetchJson<T>(url: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+function isGzipBytes(u8: Uint8Array): boolean {
+  // gzip header: 1f 8b 08
+  return u8.length >= 3 && u8[0] === 0x1f && u8[1] === 0x8b && u8[2] === 0x08;
+}
+
+async function maybeGunzipArrayBuffer(buf: ArrayBuffer): Promise<ArrayBuffer> {
+  const u8 = new Uint8Array(buf);
+  if (!isGzipBytes(u8)) return buf;
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("索引文件为 gzip 格式，但当前环境不支持自动解压。请使用 Cloudflare Pages 或为 /assets/*.bin 配置 Content-Encoding: gzip。");
+  }
+  const ds = new DecompressionStream("gzip");
+  const stream = new Blob([u8]).stream().pipeThrough(ds);
+  return await new Response(stream).arrayBuffer();
+}
+
 async function loadAsset(db: IDBDatabase, asset: AssetRef): Promise<ArrayBuffer> {
   const cached = await idbGet(db, asset.sha256);
   if (cached) return cached;
   const buf = await fetchArrayBuffer(`/${asset.path}`);
-  await idbPut(db, asset.sha256, buf);
-  return buf;
+  const decoded = await maybeGunzipArrayBuffer(buf);
+  await idbPut(db, asset.sha256, decoded);
+  return decoded;
 }
 
 const DECODER = new TextDecoder("utf-8");
