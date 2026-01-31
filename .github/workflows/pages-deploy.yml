@@ -1,0 +1,135 @@
+name: build-and-deploy
+
+on:
+  schedule:
+    # 每天检查一次数据源是否更新（UTC）
+    - cron: "0 4,16 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: 获取数据源 Release 信息
+        id: data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="zhongfly/zmh-manga-data"
+          tag="data"
+          api="/repos/${repo}/releases/tags/${tag}"
+
+          download_url="$(
+            gh api "${api}" --jq '.assets[] | select(.name=="zaimanhua.sqlite3") | .browser_download_url' | head -n 1
+          )"
+          generated_at="$(
+            gh api "${api}" --jq '.assets[] | select(.name=="zaimanhua.sqlite3") | (.updated_at // .created_at)' | head -n 1
+          )"
+
+          if [[ -z "${download_url}" ]]; then
+            echo "Release(tag=${tag}) 未找到资产：zaimanhua.sqlite3" >&2
+            exit 1
+          fi
+          if [[ -z "${generated_at}" ]]; then
+            echo "无法确定数据版本时间（asset.updated_at / asset.created_at 为空）" >&2
+            exit 1
+          fi
+
+          {
+            echo "download_url=${download_url}"
+            echo "generated_at=${generated_at}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: 恢复上次数据版本（manifest.json）
+        id: cache-prev
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/zmh-index-prev
+          key: zmh-index-manifest-${{ github.ref_name }}-${{ steps.data.outputs.generated_at }}-${{ github.run_id }}
+          restore-keys: |
+            zmh-index-manifest-${{ github.ref_name }}-${{ steps.data.outputs.generated_at }}-
+            zmh-index-manifest-${{ github.ref_name }}-
+
+      - name: 判断是否需要重新构建/部署
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DATA_GENERATED_AT: ${{ steps.data.outputs.generated_at }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          need_build="true"
+          if [[ "${EVENT_NAME}" == "schedule" ]]; then
+            prev=".cache/zmh-index-prev/manifest.json"
+            if [[ -f "${prev}" ]]; then
+              prev_generated_at="$(jq -r '.generatedAt // ""' "${prev}" | tr -d '\r' || true)"
+              if [[ -n "${prev_generated_at}" && "${prev_generated_at}" == "${DATA_GENERATED_AT}" ]]; then
+                need_build="false"
+              fi
+            fi
+          fi
+          echo "need_build=${need_build}" >> "${GITHUB_OUTPUT}"
+
+      - name: 下载 zaimanhua.sqlite3
+        if: steps.decide.outputs.need_build == 'true'
+        run: |
+          mkdir -p data
+          curl -fL "${{ steps.data.outputs.download_url }}" -o data/zaimanhua.sqlite3
+
+      - name: 生成索引（public/assets）
+        if: steps.decide.outputs.need_build == 'true'
+        run: |
+          python scripts/build_index.py data/zaimanhua.sqlite3 --clean --generated-at "${{ steps.data.outputs.generated_at }}"
+
+      - name: 安装依赖
+        if: steps.decide.outputs.need_build == 'true'
+        run: npm ci
+
+      - name: 构建 dist
+        if: steps.decide.outputs.need_build == 'true'
+        run: npm run build
+
+      - name: 部署到 Cloudflare Pages
+        if: steps.decide.outputs.need_build == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=${{ secrets.CLOUDFLARE_PAGES_PROJECT_NAME }}
+
+      - name: 缓存本次数据版本（manifest.json）
+        if: steps.decide.outputs.need_build == 'true'
+        run: |
+          mkdir -p .cache/zmh-index
+          cp public/assets/manifest.json .cache/zmh-index/manifest.json
+
+      - name: 保存数据版本缓存
+        if: steps.decide.outputs.need_build == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/zmh-index
+          key: zmh-index-manifest-${{ github.ref_name }}-${{ steps.data.outputs.generated_at }}-${{ github.run_id }}
