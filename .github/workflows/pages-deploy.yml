@@ -16,7 +16,7 @@ on:
       - 'tailwind.config.cjs'
       - 'postcss.config.cjs'
   schedule:
-    - cron: "0 4,10,16 * * *"
+    - cron: "0 2,12,17 * * *"
   workflow_dispatch:
 
 concurrency:
