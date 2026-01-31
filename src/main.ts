@@ -23,6 +23,8 @@ type WorkerResultsMsg = {
     tags: Array<{ tagId: number; name: string }>;
     hidden: boolean;
     isHideChapter: boolean;
+    needLogin: boolean;
+    isLock: boolean;
   }>;
 };
 
@@ -91,8 +93,8 @@ app.innerHTML = `
               disabled
             >
               <option value="any">所有</option>
-              <option value="only0">不显示隐藏漫画</option>
-              <option value="only1">仅显示隐藏漫画</option>
+              <option value="only0">否</option>
+              <option value="only1">是</option>
             </select>
           </label>
 
@@ -104,8 +106,8 @@ app.innerHTML = `
               disabled
             >
               <option value="any">所有</option>
-              <option value="only0">不显示章节被隐藏</option>
-              <option value="only1">仅显示章节被隐藏</option>
+              <option value="only0">否</option>
+              <option value="only1">是</option>
             </select>
           </label>
 
@@ -117,8 +119,21 @@ app.innerHTML = `
               disabled
             >
               <option value="any">所有</option>
-              <option value="only0">不需要登录</option>
-              <option value="only1">需要登录</option>
+              <option value="only0">否</option>
+              <option value="only1">是</option>
+            </select>
+          </label>
+
+          <label class="flex flex-col gap-1 lg:flex-row lg:items-center lg:gap-2">
+            <span class="text-xs text-slate-600 dark:text-slate-300">是否下架</span>
+            <select
+              class="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none ring-brand-200 transition-shadow focus:ring-4 disabled:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
+              data-role="lock"
+              disabled
+            >
+              <option value="any">所有</option>
+              <option value="only0">未下架</option>
+              <option value="only1">已下架</option>
             </select>
           </label>
         </div>
@@ -232,6 +247,7 @@ const sortSelect = qs<HTMLSelectElement>('[data-role="sort"]');
 const hiddenSelect = qs<HTMLSelectElement>('[data-role="hidden"]');
 const hideChapterSelect = qs<HTMLSelectElement>('[data-role="hideChapter"]');
 const needLoginSelect = qs<HTMLSelectElement>('[data-role="needLogin"]');
+const lockSelect = qs<HTMLSelectElement>('[data-role="lock"]');
 const searchBtn = qs<HTMLButtonElement>('[data-role="searchBtn"]');
 const tagList = qs<HTMLDivElement>('[data-role="tagList"]');
 const toggleTagsBtn = qs<HTMLButtonElement>('[data-role="toggleTags"]');
@@ -315,6 +331,7 @@ function loadUiSettings(): Partial<{
   hidden: FilterMode;
   hideChapter: FilterMode;
   needLogin: FilterMode;
+  lock: FilterMode;
 }> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_UI_SETTINGS);
@@ -325,6 +342,7 @@ function loadUiSettings(): Partial<{
       hidden: FilterMode;
       hideChapter: FilterMode;
       needLogin: FilterMode;
+      lock: FilterMode;
     }> = {};
 
     const sort = parsed?.sort;
@@ -341,6 +359,9 @@ function loadUiSettings(): Partial<{
     if (needLogin === "any" || needLogin === "only0" || needLogin === "only1")
       out.needLogin = needLogin;
 
+    const lock = parsed?.lock;
+    if (lock === "any" || lock === "only0" || lock === "only1") out.lock = lock;
+
     return out;
   } catch {
     return {};
@@ -354,6 +375,7 @@ function saveUiSettings(): void {
       hidden: hiddenSelect.value as FilterMode,
       hideChapter: hideChapterSelect.value as FilterMode,
       needLogin: needLoginSelect.value as FilterMode,
+      lock: lockSelect.value as FilterMode,
     };
     localStorage.setItem(STORAGE_KEY_UI_SETTINGS, JSON.stringify(payload));
   } catch {
@@ -366,6 +388,7 @@ if (restoredSettings.sort) sortSelect.value = restoredSettings.sort;
 if (restoredSettings.hidden) hiddenSelect.value = restoredSettings.hidden;
 if (restoredSettings.hideChapter) hideChapterSelect.value = restoredSettings.hideChapter;
 if (restoredSettings.needLogin) needLoginSelect.value = restoredSettings.needLogin;
+if (restoredSettings.lock) lockSelect.value = restoredSettings.lock;
 
 function maybeAutoLoadMore(): void {
   if (!autoLoadSupported) return;
@@ -416,7 +439,15 @@ function setLoadingOverlay(visible: boolean, stage?: string): void {
 setLoadingOverlay(true);
 
 function setEnabled(enabled: boolean): void {
-  for (const el of [qInput, sortSelect, hiddenSelect, hideChapterSelect, needLoginSelect, searchBtn]) {
+  for (const el of [
+    qInput,
+    sortSelect,
+    hiddenSelect,
+    hideChapterSelect,
+    needLoginSelect,
+    lockSelect,
+    searchBtn,
+  ]) {
     el.disabled = !enabled;
   }
   toggleTagsBtn.disabled = !enabled;
@@ -504,6 +535,12 @@ function renderResults(): void {
           : "",
         it.isHideChapter
           ? `<span class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-200">章节被隐藏</span>`
+          : "",
+        it.needLogin
+          ? `<span class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-200">需要登录</span>`
+          : "",
+        it.isLock
+          ? `<span class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-200">已下架</span>`
           : "",
       ]
         .filter(Boolean)
@@ -640,6 +677,7 @@ function getParams() {
     hidden: hiddenSelect.value as FilterMode,
     hideChapter: hideChapterSelect.value as FilterMode,
     needLogin: needLoginSelect.value as FilterMode,
+    lock: lockSelect.value as FilterMode,
     tagBits: toTagBits(),
     excludeTagBits: toExcludeTagBits(),
   };
@@ -653,7 +691,8 @@ function shouldSkipSearch(params: ReturnType<typeof getParams>): boolean {
     params.excludeTagBits.length > 0 ||
     params.hidden !== "any" ||
     params.hideChapter !== "any" ||
-    params.needLogin !== "any";
+    params.needLogin !== "any" ||
+    params.lock !== "any";
   return !hasQuery && !hasFilters;
 }
 
@@ -808,6 +847,10 @@ hideChapterSelect.addEventListener("change", () => {
   doSearch(1);
 });
 needLoginSelect.addEventListener("change", () => {
+  saveUiSettings();
+  doSearch(1);
+});
+lockSelect.addEventListener("change", () => {
   saveUiSettings();
   doSearch(1);
 });

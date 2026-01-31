@@ -55,6 +55,7 @@ type SearchMessage = {
   hidden: FilterMode;
   hideChapter: FilterMode;
   needLogin: FilterMode;
+  lock: FilterMode;
   sort: SortMode;
   page: number;
   size: number;
@@ -80,6 +81,8 @@ type ResultItem = {
   tags: Array<{ tagId: number; name: string }>;
   hidden: boolean;
   isHideChapter: boolean;
+  needLogin: boolean;
+  isLock: boolean;
 };
 
 type ResultsMessage = {
@@ -386,6 +389,7 @@ function passesFilters(
   hidden: FilterMode,
   hideChapter: FilterMode,
   needLogin: FilterMode,
+  lock: FilterMode,
 ): boolean {
   if (selectedLo !== 0 || selectedHi !== 0) {
     if ((meta.tagLo[docId] & selectedLo) !== selectedLo) return false;
@@ -409,6 +413,11 @@ function passesFilters(
     const isNeedLogin = (f & 4) !== 0;
     if (needLogin === "only0" && isNeedLogin) return false;
     if (needLogin === "only1" && !isNeedLogin) return false;
+  }
+  if (lock !== "any") {
+    const isLocked = (f & 8) !== 0;
+    if (lock === "only0" && isLocked) return false;
+    if (lock === "only1" && !isLocked) return false;
   }
 
   return true;
@@ -452,6 +461,8 @@ function buildItem(s: LoadedState, docId: number): ResultItem {
   const f = m.flags[docId];
   const hidden = (f & 1) !== 0;
   const isHideChapter = (f & 2) !== 0;
+  const needLogin = (f & 4) !== 0;
+  const isLock = (f & 8) !== 0;
 
   const title = decodeString(m.titlesPool, m.titlesOffsets, docId);
   const coverPart = decodeString(m.coversPool, m.coversOffsets, docId);
@@ -474,6 +485,8 @@ function buildItem(s: LoadedState, docId: number): ResultItem {
     tags: tagsFromMask(s.tagByBit, m.tagLo[docId], m.tagHi[docId]),
     hidden,
     isHideChapter,
+    needLogin,
+    isLock,
   };
 }
 
@@ -545,7 +558,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
 
   const items: ResultItem[] = [];
 
-  const cacheKey = `${msg.sort}|${msg.hidden}|${msg.hideChapter}|${msg.needLogin}|${selectedLo},${selectedHi}|${excludedLo},${excludedHi}|${qKey}`;
+  const cacheKey = `${msg.sort}|${msg.hidden}|${msg.hideChapter}|${msg.needLogin}|${msg.lock}|${selectedLo},${selectedHi}|${excludedLo},${excludedHi}|${qKey}`;
   const cached = s.cache;
   if (cached?.key === cacheKey) {
     const total = cached.docIds.length;
@@ -565,7 +578,8 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
       excludedHi === 0 &&
       msg.hidden === "any" &&
       msg.hideChapter === "any" &&
-      msg.needLogin === "any"
+      msg.needLogin === "any" &&
+      msg.lock === "any"
     ) {
       s.cache = { key: cacheKey, docIds: new Int32Array(0) };
       return {
@@ -593,6 +607,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
+            msg.lock,
           )
         ) {
           continue;
@@ -612,6 +627,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
+            msg.lock,
           )
         ) {
           continue;
@@ -645,6 +661,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
+            msg.lock,
           )
         ) {
           continue;
@@ -665,6 +682,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
+            msg.lock,
           )
         ) {
           continue;
@@ -724,6 +742,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
               msg.hidden,
               msg.hideChapter,
               msg.needLogin,
+              msg.lock,
             )
           ) {
             return;
@@ -843,6 +862,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
           msg.hidden,
           msg.hideChapter,
           msg.needLogin,
+          msg.lock,
         )
       ) {
         return;
