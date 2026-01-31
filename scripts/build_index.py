@@ -286,7 +286,13 @@ def _build(conn: sqlite3.Connection) -> Tuple[bytes, bytes, bytes, dict, dict]:
             hidden_value = 0
         hidden = 1 if hidden_value != 0 else 0
         hide_chapter = 1 if obj.get("isHideChapter") == 1 else 0
-        f = (hidden & 1) | ((hide_chapter & 1) << 1)
+        raw_need_login = obj.get("is_need_login")
+        try:
+            need_login_value = int(raw_need_login)
+        except (TypeError, ValueError):
+            need_login_value = 0
+        need_login = 1 if need_login_value != 0 else 0
+        f = (hidden & 1) | ((hide_chapter & 1) << 1) | ((need_login & 1) << 2)
 
         ids.append(comic_id)
         titles.append(title)

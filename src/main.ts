@@ -108,6 +108,19 @@ app.innerHTML = `
               <option value="only1">仅显示章节被隐藏</option>
             </select>
           </label>
+
+          <label class="flex flex-col gap-1 lg:flex-row lg:items-center lg:gap-2">
+            <span class="text-xs text-slate-600 dark:text-slate-300">需要登录</span>
+            <select
+              class="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none ring-brand-200 transition-shadow focus:ring-4 disabled:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:disabled:bg-slate-800"
+              data-role="needLogin"
+              disabled
+            >
+              <option value="any">所有</option>
+              <option value="only0">不需要登录</option>
+              <option value="only1">需要登录</option>
+            </select>
+          </label>
         </div>
 
       <div class="mt-4">
@@ -218,6 +231,7 @@ const clearQBtn = qs<HTMLButtonElement>('[data-role="clearQ"]');
 const sortSelect = qs<HTMLSelectElement>('[data-role="sort"]');
 const hiddenSelect = qs<HTMLSelectElement>('[data-role="hidden"]');
 const hideChapterSelect = qs<HTMLSelectElement>('[data-role="hideChapter"]');
+const needLoginSelect = qs<HTMLSelectElement>('[data-role="needLogin"]');
 const searchBtn = qs<HTMLButtonElement>('[data-role="searchBtn"]');
 const tagList = qs<HTMLDivElement>('[data-role="tagList"]');
 const toggleTagsBtn = qs<HTMLButtonElement>('[data-role="toggleTags"]');
@@ -300,12 +314,18 @@ function loadUiSettings(): Partial<{
   sort: SortMode;
   hidden: FilterMode;
   hideChapter: FilterMode;
+  needLogin: FilterMode;
 }> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_UI_SETTINGS);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const out: Partial<{ sort: SortMode; hidden: FilterMode; hideChapter: FilterMode }> = {};
+    const out: Partial<{
+      sort: SortMode;
+      hidden: FilterMode;
+      hideChapter: FilterMode;
+      needLogin: FilterMode;
+    }> = {};
 
     const sort = parsed?.sort;
     if (sort === "relevance" || sort === "id_desc" || sort === "id_asc") out.sort = sort;
@@ -316,6 +336,10 @@ function loadUiSettings(): Partial<{
     const hideChapter = parsed?.hideChapter;
     if (hideChapter === "any" || hideChapter === "only0" || hideChapter === "only1")
       out.hideChapter = hideChapter;
+
+    const needLogin = parsed?.needLogin;
+    if (needLogin === "any" || needLogin === "only0" || needLogin === "only1")
+      out.needLogin = needLogin;
 
     return out;
   } catch {
@@ -329,6 +353,7 @@ function saveUiSettings(): void {
       sort: sortSelect.value as SortMode,
       hidden: hiddenSelect.value as FilterMode,
       hideChapter: hideChapterSelect.value as FilterMode,
+      needLogin: needLoginSelect.value as FilterMode,
     };
     localStorage.setItem(STORAGE_KEY_UI_SETTINGS, JSON.stringify(payload));
   } catch {
@@ -340,6 +365,7 @@ const restoredSettings = loadUiSettings();
 if (restoredSettings.sort) sortSelect.value = restoredSettings.sort;
 if (restoredSettings.hidden) hiddenSelect.value = restoredSettings.hidden;
 if (restoredSettings.hideChapter) hideChapterSelect.value = restoredSettings.hideChapter;
+if (restoredSettings.needLogin) needLoginSelect.value = restoredSettings.needLogin;
 
 function maybeAutoLoadMore(): void {
   if (!autoLoadSupported) return;
@@ -390,7 +416,7 @@ function setLoadingOverlay(visible: boolean, stage?: string): void {
 setLoadingOverlay(true);
 
 function setEnabled(enabled: boolean): void {
-  for (const el of [qInput, sortSelect, hiddenSelect, hideChapterSelect, searchBtn]) {
+  for (const el of [qInput, sortSelect, hiddenSelect, hideChapterSelect, needLoginSelect, searchBtn]) {
     el.disabled = !enabled;
   }
   toggleTagsBtn.disabled = !enabled;
@@ -613,6 +639,7 @@ function getParams() {
     sort: sortSelect.value as SortMode,
     hidden: hiddenSelect.value as FilterMode,
     hideChapter: hideChapterSelect.value as FilterMode,
+    needLogin: needLoginSelect.value as FilterMode,
     tagBits: toTagBits(),
     excludeTagBits: toExcludeTagBits(),
   };
@@ -625,7 +652,8 @@ function shouldSkipSearch(params: ReturnType<typeof getParams>): boolean {
     params.tagBits.length > 0 ||
     params.excludeTagBits.length > 0 ||
     params.hidden !== "any" ||
-    params.hideChapter !== "any";
+    params.hideChapter !== "any" ||
+    params.needLogin !== "any";
   return !hasQuery && !hasFilters;
 }
 
@@ -776,6 +804,10 @@ hiddenSelect.addEventListener("change", () => {
   doSearch(1);
 });
 hideChapterSelect.addEventListener("change", () => {
+  saveUiSettings();
+  doSearch(1);
+});
+needLoginSelect.addEventListener("change", () => {
   saveUiSettings();
   doSearch(1);
 });

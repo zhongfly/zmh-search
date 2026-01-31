@@ -54,6 +54,7 @@ type SearchMessage = {
   excludeTagBits: number[];
   hidden: FilterMode;
   hideChapter: FilterMode;
+  needLogin: FilterMode;
   sort: SortMode;
   page: number;
   size: number;
@@ -384,6 +385,7 @@ function passesFilters(
   excludedHi: number,
   hidden: FilterMode,
   hideChapter: FilterMode,
+  needLogin: FilterMode,
 ): boolean {
   if (selectedLo !== 0 || selectedHi !== 0) {
     if ((meta.tagLo[docId] & selectedLo) !== selectedLo) return false;
@@ -402,6 +404,11 @@ function passesFilters(
     const isHideChapter = (f & 2) !== 0;
     if (hideChapter === "only0" && isHideChapter) return false;
     if (hideChapter === "only1" && !isHideChapter) return false;
+  }
+  if (needLogin !== "any") {
+    const isNeedLogin = (f & 4) !== 0;
+    if (needLogin === "only0" && isNeedLogin) return false;
+    if (needLogin === "only1" && !isNeedLogin) return false;
   }
 
   return true;
@@ -538,7 +545,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
 
   const items: ResultItem[] = [];
 
-  const cacheKey = `${msg.sort}|${msg.hidden}|${msg.hideChapter}|${selectedLo},${selectedHi}|${excludedLo},${excludedHi}|${qKey}`;
+  const cacheKey = `${msg.sort}|${msg.hidden}|${msg.hideChapter}|${msg.needLogin}|${selectedLo},${selectedHi}|${excludedLo},${excludedHi}|${qKey}`;
   const cached = s.cache;
   if (cached?.key === cacheKey) {
     const total = cached.docIds.length;
@@ -557,7 +564,8 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
       excludedLo === 0 &&
       excludedHi === 0 &&
       msg.hidden === "any" &&
-      msg.hideChapter === "any"
+      msg.hideChapter === "any" &&
+      msg.needLogin === "any"
     ) {
       s.cache = { key: cacheKey, docIds: new Int32Array(0) };
       return {
@@ -584,6 +592,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
             excludedHi,
             msg.hidden,
             msg.hideChapter,
+            msg.needLogin,
           )
         ) {
           continue;
@@ -602,6 +611,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
             excludedHi,
             msg.hidden,
             msg.hideChapter,
+            msg.needLogin,
           )
         ) {
           continue;
@@ -634,6 +644,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
             excludedHi,
             msg.hidden,
             msg.hideChapter,
+            msg.needLogin,
           )
         ) {
           continue;
@@ -653,6 +664,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
             excludedHi,
             msg.hidden,
             msg.hideChapter,
+            msg.needLogin,
           )
         ) {
           continue;
@@ -711,6 +723,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
               excludedHi,
               msg.hidden,
               msg.hideChapter,
+              msg.needLogin,
             )
           ) {
             return;
@@ -829,6 +842,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
           excludedHi,
           msg.hidden,
           msg.hideChapter,
+          msg.needLogin,
         )
       ) {
         return;
