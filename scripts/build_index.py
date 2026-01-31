@@ -279,7 +279,12 @@ def _build(conn: sqlite3.Connection) -> Tuple[bytes, bytes, bytes, dict, dict]:
             else:
                 mask_hi |= 1 << (bit - 32)
 
-        hidden = 1 if obj.get("hidden") == 1 else 0
+        raw_hidden = obj.get("hidden")
+        try:
+            hidden_value = int(raw_hidden)
+        except (TypeError, ValueError):
+            hidden_value = 0
+        hidden = 1 if hidden_value != 0 else 0
         hide_chapter = 1 if obj.get("isHideChapter") == 1 else 0
         f = (hidden & 1) | ((hide_chapter & 1) << 1)
 
