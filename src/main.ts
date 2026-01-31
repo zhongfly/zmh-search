@@ -705,7 +705,12 @@ function debouncedSearch(): void {
 
 function doSearch(page: number): void {
   const params = getParams();
-  if (page === 1) loadingMore = false;
+  if (page === 1) {
+    // 避免切换筛选/关键词后仍用旧的 hasMore 触发自动加载，导致跳过第 1 页并混入旧结果
+    loadingMore = false;
+    currentHasMore = false;
+    currentItems = [];
+  }
   if (page === 1 && shouldSkipSearch(params)) {
     currentItems = [];
     currentTotalMatches = 0;
