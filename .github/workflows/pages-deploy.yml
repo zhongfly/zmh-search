@@ -1,6 +1,20 @@
 name: build-and-deploy
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'index.html'
+      - 'vite.config.ts'
+      - 'tsconfig.json'
+      - 'tailwind.config.cjs'
+      - 'postcss.config.cjs'
   schedule:
     - cron: "0 4,10,16 * * *"
   workflow_dispatch:
