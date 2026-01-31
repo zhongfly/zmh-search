@@ -909,24 +909,24 @@ async function init(): Promise<void> {
   post({ type: "progress", stage: "打开本地缓存…" });
   const db = await openDb();
 
-  post({ type: "progress", stage: "加载 tags…" });
-  const tagsBuf = await loadAsset(db, manifest.assets.tags);
+  post({ type: "progress", stage: "并发加载索引文件（tags/meta/dict/index）…" });
+  const [tagsBuf, metaBuf, dictBuf, indexBuf] = await Promise.all([
+    loadAsset(db, manifest.assets.tags),
+    loadAsset(db, manifest.assets.meta),
+    loadAsset(db, manifest.assets.dict),
+    loadAsset(db, manifest.assets.index),
+  ]);
+
   const tagsJson = JSON.parse(decodeUtf8(tagsBuf)) as TagsJson;
   const tags = tagsJson.tags;
 
   const tagByBit: Array<{ tagId: number; name: string }> = [];
   for (const t of tags) tagByBit[t.bit] = { tagId: t.tagId, name: t.name };
 
-  post({ type: "progress", stage: "加载 meta…" });
-  const metaBuf = await loadAsset(db, manifest.assets.meta);
   const meta = parseMetaBin(metaBuf);
 
-  post({ type: "progress", stage: "加载 dict…" });
-  const dictBuf = await loadAsset(db, manifest.assets.dict);
   const dict = parseDictBin(dictBuf);
 
-  post({ type: "progress", stage: "加载 index…" });
-  const indexBuf = await loadAsset(db, manifest.assets.index);
   const index = new Uint8Array(indexBuf);
 
   state = {
