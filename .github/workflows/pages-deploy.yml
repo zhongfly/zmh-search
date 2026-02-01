@@ -15,8 +15,6 @@ on:
       - 'tsconfig.json'
       - 'tailwind.config.cjs'
       - 'postcss.config.cjs'
-  schedule:
-    - cron: "0 2,12,17 * * *"
   workflow_dispatch:
 
 concurrency:
