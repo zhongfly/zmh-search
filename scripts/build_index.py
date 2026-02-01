@@ -286,12 +286,33 @@ def _build(conn: sqlite3.Connection) -> Tuple[bytes, bytes, bytes, dict, dict]:
             hidden_value = 0
         hidden = 1 if hidden_value != 0 else 0
         hide_chapter = 1 if obj.get("isHideChapter") == 1 else 0
-        raw_need_login = obj.get("is_need_login")
-        try:
-            need_login_value = int(raw_need_login)
-        except (TypeError, ValueError):
-            need_login_value = 0
-        need_login = 1 if need_login_value != 0 else 0
+        raw_can_read = obj.get("canRead")
+        can_read: Optional[bool]
+        if isinstance(raw_can_read, bool):
+            can_read = raw_can_read
+        elif isinstance(raw_can_read, str):
+            t = raw_can_read.strip().lower()
+            if t in ("1", "true", "yes", "y"):
+                can_read = True
+            elif t in ("0", "false", "no", "n"):
+                can_read = False
+            else:
+                can_read = None
+        else:
+            try:
+                can_read = int(raw_can_read) != 0
+            except (TypeError, ValueError):
+                can_read = None
+
+        if can_read is None:
+            raw_need_login = obj.get("is_need_login")
+            try:
+                need_login_value = int(raw_need_login)
+            except (TypeError, ValueError):
+                need_login_value = 0
+            need_login = 1 if need_login_value != 0 else 0
+        else:
+            need_login = 1 if not can_read else 0
         raw_is_lock = obj.get("is_lock")
         try:
             is_lock_value = int(raw_is_lock)
