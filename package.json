@@ -8,7 +8,7 @@
     "build:index": "python scripts/build_index.py --clean",
     "build": "vite build",
     "postbuild": "node scripts/compress_dist.mjs",
-    "build:all": "npm run build:index && vite build",
+    "build:all": "npm run build:index && npm run build",
     "preview": "vite preview"
   },
   "devDependencies": {
