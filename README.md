@@ -30,11 +30,17 @@ npm run build:index
 ```
 
 该命令默认会清理 `public/assets/` 里旧的索引产物（仅 `meta-lite.*` / `ngram.*` / `tags.*`）。
-同时默认会将 `ngram.index` 按约 1MiB 分片生成（写入 `manifest.json` 的 `assets.indexShards`），前端会按需下载并后台预热。
-`meta-lite` 使用 v2 格式：将 `cover` 拆为「base + path」，对常见域名做去重以减少体积。
-如需关闭分片，可传参：
+默认会：
+- 将 `meta-lite` 按固定条目数分片（写入 `manifest.json` 的 `assets.metaShards`），用于“高频小增量更新”时避免全量下载。
+- 将 `ngram.index` 按 tokenKey 哈希固定分片（写入 `manifest.json` 的 `assets.indexShards`），前端会按需下载并在网络条件允许时后台预热。
+- `meta-lite` 使用 v2 格式：将 `cover` 拆为「base + path」，对常见域名做去重以减少体积。
+
+如需关闭/调整分片，可传参：
 ```bash
-npm run build:index -- --index-shard-bytes 0
+npm run build:index -- --meta-shard-docs 0
+npm run build:index -- --meta-shard-docs 8192
+npm run build:index -- --index-shard-count 0
+npm run build:index -- --index-shard-count 16
 ```
 如需保留旧文件，可直接运行：
 ```bash

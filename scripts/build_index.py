@@ -327,7 +327,19 @@ def _collect_tags(conn: sqlite3.Connection) -> List[TagInfo]:
     return infos
 
 
-def _build(conn: sqlite3.Connection, index_shard_bytes: int) -> Tuple[bytes, List[bytes], bytes, dict, dict]:
+def _index_shard_id(token_key: int, shard_count: int) -> int:
+    if shard_count <= 1:
+        return 0
+    # 对 uint32 做乘法哈希（Knuth），保证稳定且分布相对均匀
+    h = (int(token_key) * 2654435761) & 0xFFFFFFFF
+    return int(h % shard_count)
+
+
+def _build(
+    conn: sqlite3.Connection,
+    index_shard_count: int,
+    meta_shard_docs: int,
+) -> Tuple[List[bytes], List[bytes], bytes, dict, dict]:
     tags = _collect_tags(conn)
     tag_bit_by_id = {t.tag_id: t.bit for t in tags}
 
@@ -474,67 +486,60 @@ def _build(conn: sqlite3.Connection, index_shard_bytes: int) -> Tuple[bytes, Lis
         if dict_items[i][0] == dict_items[i - 1][0]:
             raise RuntimeError("dict tokenKey 冲突（非唯一）")
 
-    entries: List[Tuple[int, int, int, int]] = []
-    index_out = bytearray()
-    offset = 0
+    shard_count = int(index_shard_count or 0)
+    if shard_count <= 0:
+        shard_count = 1
+
+    shard_out = [bytearray() for _ in range(shard_count)]
+    entries_v2: List[Tuple[int, int, int, int, int]] = []
+    index_total = 0
     for key, doc_ids in dict_items:
         data = _encode_postings(doc_ids)
-        entries.append((key, offset, len(data), len(doc_ids)))
-        index_out.extend(data)
-        offset += len(data)
+        shard_id = _index_shard_id(key, shard_count)
+        local_off = len(shard_out[shard_id])
+        shard_out[shard_id].extend(data)
+        index_total += len(data)
+        entries_v2.append((key, shard_id, local_off, len(data), len(doc_ids)))
 
-    if index_shard_bytes and index_shard_bytes > 0 and len(index_out) > index_shard_bytes:
-        shards: List[bytes] = []
-        current = bytearray()
-        shard_id = 0
-        entries_v2: List[Tuple[int, int, int, int, int]] = []
-        for (key, off, length, df) in entries:
-            if len(current) > 0 and (len(current) + length) > index_shard_bytes:
-                shards.append(bytes(current))
-                current = bytearray()
-                shard_id += 1
+    dict_bin = _pack_dict_bin_v2(NGRAM_N, entries_v2)
+    index_parts = [bytes(b) for b in shard_out]
 
-            local_off = len(current)
-            current.extend(index_out[off : off + length])
-            entries_v2.append((key, shard_id, local_off, length, df))
+    meta_docs = int(meta_shard_docs or 0)
+    if meta_docs <= 0:
+        meta_docs = len(ids) or 1
 
-        if len(current) > 0:
-            shards.append(bytes(current))
-
-        dict_bin = _pack_dict_bin_v2(NGRAM_N, entries_v2)
-        index_parts = shards
-        stats_version = 2
-        stats_extra = {"indexShardBytes": index_shard_bytes, "indexShardCount": len(shards)}
-    else:
-        dict_bin = _pack_dict_bin(NGRAM_N, entries)
-        index_parts = [bytes(index_out)]
-        stats_version = 1
-        stats_extra = {}
-
-    meta_bin = _pack_meta_bin(
-        ids=ids,
-        titles=titles,
-        covers=covers,
-        author_texts=author_texts,
-        alias_texts=alias_texts,
-        tag_lo=tag_lo,
-        tag_hi=tag_hi,
-        flags=flags,
-        sep=LIST_SEP,
-    )
+    meta_parts: List[bytes] = []
+    for start in range(0, len(ids), meta_docs):
+        end = min(len(ids), start + meta_docs)
+        meta_parts.append(
+            _pack_meta_bin(
+                ids=ids[start:end],
+                titles=titles[start:end],
+                covers=covers[start:end],
+                author_texts=author_texts[start:end],
+                alias_texts=alias_texts[start:end],
+                tag_lo=tag_lo[start:end],
+                tag_hi=tag_hi[start:end],
+                flags=flags[start:end],
+                sep=LIST_SEP,
+            )
+        )
 
     stats = {
-        "version": stats_version,
+        "version": 3,
         "count": len(ids),
-        "uniqueTokens": len(entries),
-        "indexBytes": len(index_out),
-        **stats_extra,
+        "uniqueTokens": len(entries_v2),
+        "indexBytes": index_total,
+        "indexShardCount": shard_count,
+        "indexShardMode": "tokenKeyHash",
+        "metaShardDocs": meta_docs,
+        "metaShardCount": len(meta_parts),
     }
 
     if skipped > 0:
         print(f"提示：有 {skipped} 个 token 无法编码为 utf-16 2-unit key，已跳过", file=sys.stderr)
 
-    return meta_bin, index_parts, dict_bin, tags_json, stats
+    return meta_parts, index_parts, dict_bin, tags_json, stats
 
 
 def _parse_args(argv: List[str]):
@@ -561,10 +566,16 @@ def _parse_args(argv: List[str]):
         help="生成完成后清理 out_dir 中旧的索引产物（仅删除 meta-lite.* / ngram.* / tags.*）。",
     )
     parser.add_argument(
-        "--index-shard-bytes",
+        "--meta-shard-docs",
         type=int,
-        default=1024 * 1024,
-        help="将 ngram.index 分片的目标大小（bytes）。设为 0 表示不分片。默认：1048576（1MiB）。",
+        default=4096,
+        help="将 meta-lite 按固定条目数分片（用于高频小增量更新）。设为 0 表示不分片。默认：4096。",
+    )
+    parser.add_argument(
+        "--index-shard-count",
+        type=int,
+        default=8,
+        help="将 ngram.index 按 tokenKey 哈希固定分片的数量。设为 0 表示单分片。默认：8。",
     )
     return parser.parse_args(argv)
 
@@ -574,7 +585,8 @@ def main() -> int:
     db_path = Path(args.db)
     out_dir = Path(args.out_dir)
     generated_at = (args.generated_at or "").strip() or datetime.now(timezone.utc).isoformat()
-    index_shard_bytes = int(getattr(args, "index_shard_bytes", 0) or 0)
+    index_shard_count = int(getattr(args, "index_shard_count", 0) or 0)
+    meta_shard_docs = int(getattr(args, "meta_shard_docs", 0) or 0)
 
     if not db_path.exists():
         print(f"找不到数据库文件：{db_path.as_posix()}", file=sys.stderr)
@@ -584,63 +596,63 @@ def main() -> int:
 
     conn = sqlite3.connect(db_path.as_posix())
     try:
-        meta_bin, index_parts, dict_bin, tags_json, stats = _build(conn, index_shard_bytes=index_shard_bytes)
+        meta_parts, index_parts, dict_bin, tags_json, stats = _build(
+            conn,
+            index_shard_count=index_shard_count,
+            meta_shard_docs=meta_shard_docs,
+        )
     finally:
         conn.close()
 
-    meta_bytes = meta_bin
     dict_bytes = dict_bin
     tags_bytes = _json_bytes(tags_json)
 
-    meta_name, meta_sha, meta_size = _write_hashed(out_dir, "meta-lite", ".bin", meta_bytes)
+    meta_assets = []
+    for i, data in enumerate(meta_parts):
+        name, sha, size = _write_hashed(out_dir, f"meta-lite.s{i:03d}", ".bin", data)
+        meta_assets.append({"path": f"assets/{name}", "sha256": sha, "bytes": size})
+
     dict_name, dict_sha, dict_size = _write_hashed(out_dir, "ngram.dict", ".bin", dict_bytes)
     tags_name, tags_sha, tags_size = _write_hashed(out_dir, "tags", ".json", tags_bytes)
 
     index_assets = []
-    if stats.get("version") == 2:
-        for i, data in enumerate(index_parts):
-            name, sha, size = _write_hashed(out_dir, f"ngram.index.s{i:03d}", ".bin", data)
-            index_assets.append({"path": f"assets/{name}", "sha256": sha, "bytes": size})
-    else:
-        (index_bin,) = index_parts
-        index_name, index_sha, index_size = _write_hashed(out_dir, "ngram.index", ".bin", index_bin)
-        index_assets.append({"path": f"assets/{index_name}", "sha256": index_sha, "bytes": index_size})
+    for i, data in enumerate(index_parts):
+        name, sha, size = _write_hashed(out_dir, f"ngram.index.h{i:03d}", ".bin", data)
+        index_assets.append({"path": f"assets/{name}", "sha256": sha, "bytes": size})
 
     manifest = {
-        "version": 2,
+        "version": 3,
         "generatedAt": generated_at,
         "stats": stats,
         "assets": {
-            "meta": {"path": f"assets/{meta_name}", "sha256": meta_sha, "bytes": meta_size},
+            "metaShards": meta_assets,
             "dict": {"path": f"assets/{dict_name}", "sha256": dict_sha, "bytes": dict_size},
             "tags": {"path": f"assets/{tags_name}", "sha256": tags_sha, "bytes": tags_size},
-            **(
-                {"indexShards": index_assets}
-                if int(stats.get("version") or 1) == 2
-                else {"index": index_assets[0]}
-            ),
+            "indexShards": index_assets,
         },
     }
 
     (out_dir / "manifest.json").write_bytes(_json_bytes(manifest))
 
     if args.clean:
+        keep_meta_names = [a["path"].split("/")[-1] for a in meta_assets]
         keep_index_names = [a["path"].split("/")[-1] for a in index_assets]
         _clean_generated(
             out_dir,
             keep=[
                 ".gitkeep",
                 "manifest.json",
-                meta_name,
                 dict_name,
                 tags_name,
+                *keep_meta_names,
                 *keep_index_names,
             ],
         )
 
     print("已生成索引：")
     print(f"- {out_dir.as_posix()}/manifest.json")
-    print(f"- {out_dir.as_posix()}/{meta_name}")
+    for a in meta_assets:
+        print(f"- {out_dir.as_posix()}/{a['path'].split('/')[-1]}")
     print(f"- {out_dir.as_posix()}/{dict_name}")
     print(f"- {out_dir.as_posix()}/{tags_name}")
     for a in index_assets:

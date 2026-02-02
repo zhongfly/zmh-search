@@ -8,11 +8,14 @@ type Manifest = {
     count: number;
     uniqueTokens: number;
     indexBytes: number;
-    indexShardBytes?: number;
     indexShardCount?: number;
+    indexShardMode?: string;
+    metaShardDocs?: number;
+    metaShardCount?: number;
   };
   assets: {
-    meta: AssetRef;
+    meta?: AssetRef;
+    metaShards?: AssetRef[];
     dict: AssetRef;
     tags: AssetRef;
     index?: AssetRef;
@@ -242,6 +245,33 @@ async function loadAsset(db: IDBDatabase, asset: AssetRef, signal?: AbortSignal)
   return decoded;
 }
 
+async function loadAssetsBatched(
+  db: IDBDatabase,
+  assets: AssetRef[],
+  concurrency: number,
+  onProgress?: (done: number, total: number) => void,
+): Promise<ArrayBuffer[]> {
+  if (assets.length === 0) return [];
+  const out = new Array<ArrayBuffer>(assets.length);
+  const workerCount = Math.max(1, Math.min(concurrency | 0, assets.length));
+  let next = 0;
+  let done = 0;
+
+  const run = async () => {
+    while (true) {
+      const i = next;
+      next += 1;
+      if (i >= assets.length) return;
+      out[i] = await loadAsset(db, assets[i]);
+      done += 1;
+      onProgress?.(done, assets.length);
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, run));
+  return out;
+}
+
 const DECODER = new TextDecoder("utf-8");
 
 function decodeUtf8(buf: ArrayBuffer): string {
@@ -460,7 +490,16 @@ function parseDictBin(buf: ArrayBuffer): DictBin {
 
 type LoadedState = {
   db: IDBDatabase;
-  meta: MetaBin;
+  totalCount: number;
+  metaSep: string;
+  metaShardDocs: number;
+  metaShardShift: number | null;
+  metaShardMask: number;
+  metaShards: MetaBin[];
+  metaIds: Int32Array;
+  metaTagLo: Uint32Array;
+  metaTagHi: Uint32Array;
+  metaFlags: Uint8Array;
   tags: TagsJson["tags"];
   tagByBit: Array<{ tagId: number; name: string }>;
   dict: DictBin;
@@ -579,7 +618,7 @@ function shouldPreloadIndex(): boolean {
 }
 
 function passesFilters(
-  meta: LoadedState["meta"],
+  s: LoadedState,
   docId: number,
   selectedLo: number,
   selectedHi: number,
@@ -591,13 +630,13 @@ function passesFilters(
   lock: FilterMode,
 ): boolean {
   if (selectedLo !== 0 || selectedHi !== 0) {
-    if ((meta.tagLo[docId] & selectedLo) !== selectedLo) return false;
-    if ((meta.tagHi[docId] & selectedHi) !== selectedHi) return false;
+    if (((s.metaTagLo[docId] ?? 0) & selectedLo) !== selectedLo) return false;
+    if (((s.metaTagHi[docId] ?? 0) & selectedHi) !== selectedHi) return false;
   }
-  if (excludedLo !== 0 && (meta.tagLo[docId] & excludedLo) !== 0) return false;
-  if (excludedHi !== 0 && (meta.tagHi[docId] & excludedHi) !== 0) return false;
+  if (excludedLo !== 0 && ((s.metaTagLo[docId] ?? 0) & excludedLo) !== 0) return false;
+  if (excludedHi !== 0 && ((s.metaTagHi[docId] ?? 0) & excludedHi) !== 0) return false;
 
-  const f = meta.flags[docId];
+  const f = s.metaFlags[docId] ?? 0;
   if (hidden !== "any") {
     const isHidden = (f & 1) !== 0;
     if (hidden === "only0" && isHidden) return false;
@@ -655,31 +694,54 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
   return DECODER.decode(pool.subarray(start, end));
 }
 
+function shardShiftForDocs(shardDocs: number): number | null {
+  const n = shardDocs | 0;
+  if (n <= 0) return null;
+  if ((n & (n - 1)) !== 0) return null;
+  return 31 - Math.clz32(n);
+}
+
+function metaShardId(s: LoadedState, docId: number): number {
+  const shift = s.metaShardShift;
+  if (shift !== null) return docId >>> shift;
+  return Math.floor(docId / s.metaShardDocs);
+}
+
+function metaLocalDocId(s: LoadedState, docId: number, shardId: number): number {
+  const shift = s.metaShardShift;
+  if (shift !== null) return docId & s.metaShardMask;
+  return docId - shardId * s.metaShardDocs;
+}
+
 function buildItem(s: LoadedState, docId: number): ResultItem {
-  const m = s.meta;
-  const f = m.flags[docId];
+  const f = s.metaFlags[docId] ?? 0;
   const hidden = (f & 1) !== 0;
   const isHideChapter = (f & 2) !== 0;
   const needLogin = (f & 4) !== 0;
   const isLock = (f & 8) !== 0;
 
-  const title = decodeString(m.titlesPool, m.titlesOffsets, docId);
-  const coverPath = decodeString(m.coverPathsPool, m.coverPathsOffsets, docId);
-  const coverBaseId = m.coverBaseIds[docId] ?? 0;
+  const shardId = metaShardId(s, docId);
+  const shard = s.metaShards[shardId];
+  if (!shard) throw new Error(`meta 分片不存在：${shardId}`);
+  const localDocId = metaLocalDocId(s, docId, shardId);
+
+  const title = decodeString(shard.titlesPool, shard.titlesOffsets, localDocId);
+  const coverPath = decodeString(shard.coverPathsPool, shard.coverPathsOffsets, localDocId);
+  const coverBaseId = shard.coverBaseIds[localDocId] ?? 0;
   const coverBase =
-    coverBaseId === 0 ? "" : decodeString(m.coverBasePool, m.coverBaseOffsets, coverBaseId);
+    coverBaseId === 0 ? "" : decodeString(shard.coverBasePool, shard.coverBaseOffsets, coverBaseId);
   const cover = coverBase.length > 0 ? `${coverBase}${coverPath}` : coverPath;
 
-  const aliasesText = decodeString(m.aliasesPool, m.aliasesOffsets, docId);
-  const authorsText = decodeString(m.authorsPool, m.authorsOffsets, docId);
+  const aliasesText = decodeString(shard.aliasesPool, shard.aliasesOffsets, localDocId);
+  const authorsText = decodeString(shard.authorsPool, shard.authorsOffsets, localDocId);
 
   return {
-    id: m.ids[docId],
+    id: s.metaIds[docId] ?? 0,
     title,
     cover,
-    aliases: splitList(aliasesText, m.sep),
-    authors: splitList(authorsText, m.sep),
-    tags: tagsFromMask(s.tagByBit, m.tagLo[docId], m.tagHi[docId]),
+    aliases: splitList(aliasesText, s.metaSep),
+    authors: splitList(authorsText, s.metaSep),
+    tags: tagsFromMask(s.tagByBit, s.metaTagLo[docId] ?? 0, s.metaTagHi[docId] ?? 0),
     hidden,
     isHideChapter,
     needLogin,
@@ -696,7 +758,7 @@ function resetTouched(s: LoadedState): void {
 }
 
 function buildExcludeMask(s: LoadedState, excludeTerms: string[]): Uint8Array {
-  const mask = new Uint8Array(s.meta.count);
+  const mask = new Uint8Array(s.totalCount);
   const termTouched: number[] = [];
 
   for (const term of excludeTerms) {
@@ -773,7 +835,7 @@ async function searchAsync(
 }
 
 function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
-  const meta = s.meta;
+  const totalCount = s.totalCount;
   const { include: includeTerms, exclude: excludeTerms } = parseQuery(msg.q);
   const qNorm = includeTerms.length === 1 ? includeTerms[0] : "";
   const queryTokens = qNorm ? uniqNgrams(qNorm, s.dict.n) : [];
@@ -826,10 +888,10 @@ function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
 
     const docIds: number[] = [];
     if (msg.sort === "id_asc") {
-      for (let docId = 0; docId < meta.count; docId += 1) {
+      for (let docId = 0; docId < totalCount; docId += 1) {
         if (
           !passesFilters(
-            meta,
+            s,
             docId,
             selectedLo,
             selectedHi,
@@ -846,10 +908,10 @@ function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
         docIds.push(docId);
       }
     } else {
-      for (let docId = meta.count - 1; docId >= 0; docId -= 1) {
+      for (let docId = totalCount - 1; docId >= 0; docId -= 1) {
         if (
           !passesFilters(
-            meta,
+            s,
             docId,
             selectedLo,
             selectedHi,
@@ -880,10 +942,10 @@ function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
     const sort = msg.sort === "id_asc" ? "id_asc" : "id_desc";
     const docIds: number[] = [];
     if (sort === "id_asc") {
-      for (let docId = 0; docId < meta.count; docId += 1) {
+      for (let docId = 0; docId < totalCount; docId += 1) {
         if (
           !passesFilters(
-            meta,
+            s,
             docId,
             selectedLo,
             selectedHi,
@@ -901,10 +963,10 @@ function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
         docIds.push(docId);
       }
     } else {
-      for (let docId = meta.count - 1; docId >= 0; docId -= 1) {
+      for (let docId = totalCount - 1; docId >= 0; docId -= 1) {
         if (
           !passesFilters(
-            meta,
+            s,
             docId,
             selectedLo,
             selectedHi,
@@ -962,7 +1024,7 @@ function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
           if (excludeMask && excludeMask[docId] === 1) return;
           if (
             !passesFilters(
-              meta,
+              s,
               docId,
               selectedLo,
               selectedHi,
@@ -1009,9 +1071,14 @@ function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
 
     if (isRelevanceSort) {
       for (const docId of candidates) {
-        const titleText = decodeString(meta.titlesPool, meta.titlesOffsets, docId);
-        const aliasesText = decodeString(meta.aliasesPool, meta.aliasesOffsets, docId);
-        const authorsText = decodeString(meta.authorsPool, meta.authorsOffsets, docId);
+        const shardId = metaShardId(s, docId);
+        const shard = s.metaShards[shardId];
+        if (!shard) continue;
+        const localDocId = metaLocalDocId(s, docId, shardId);
+
+        const titleText = decodeString(shard.titlesPool, shard.titlesOffsets, localDocId);
+        const aliasesText = decodeString(shard.aliasesPool, shard.aliasesOffsets, localDocId);
+        const authorsText = decodeString(shard.authorsPool, shard.authorsOffsets, localDocId);
 
         const titleNorm = normText(titleText);
         const aliasesNorm = normText(aliasesText);
@@ -1030,7 +1097,7 @@ function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
         const sa = s.scores[a];
         const sb = s.scores[b];
         if (sb !== sa) return sb - sa;
-        return meta.ids[b] - meta.ids[a];
+        return (s.metaIds[b] ?? 0) - (s.metaIds[a] ?? 0);
       });
     } else {
       // meta 按 id 排序写入，因此 docId 顺序即上架时间顺序
@@ -1080,7 +1147,7 @@ function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
       if (excludeMask && excludeMask[docId] === 1) return;
       if (
         !passesFilters(
-          meta,
+          s,
           docId,
           selectedLo,
           selectedHi,
@@ -1104,12 +1171,12 @@ function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
   if (sort === "id_desc" || sort === "id_asc") {
     const docIds: number[] = [];
     if (sort === "id_asc") {
-      for (let docId = 0; docId < meta.count; docId += 1) {
+      for (let docId = 0; docId < totalCount; docId += 1) {
         if (s.counts[docId] < minHitClamped) continue;
         docIds.push(docId);
       }
     } else {
-      for (let docId = meta.count - 1; docId >= 0; docId -= 1) {
+      for (let docId = totalCount - 1; docId >= 0; docId -= 1) {
         if (s.counts[docId] < minHitClamped) continue;
         docIds.push(docId);
       }
@@ -1132,13 +1199,18 @@ function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
 
     let score = hit / queryTokens.length;
 
-    const title = decodeString(meta.titlesPool, meta.titlesOffsets, docId);
+    const shardId = metaShardId(s, docId);
+    const shard = s.metaShards[shardId];
+    if (!shard) continue;
+    const localDocId = metaLocalDocId(s, docId, shardId);
+
+    const title = decodeString(shard.titlesPool, shard.titlesOffsets, localDocId);
     if (normText(title).includes(qNorm)) score += 1.4;
 
-    const aliasesText = decodeString(meta.aliasesPool, meta.aliasesOffsets, docId);
+    const aliasesText = decodeString(shard.aliasesPool, shard.aliasesOffsets, localDocId);
     if (normText(aliasesText).includes(qNorm)) score += 0.6;
 
-    const authorsText = decodeString(meta.authorsPool, meta.authorsOffsets, docId);
+    const authorsText = decodeString(shard.authorsPool, shard.authorsOffsets, localDocId);
     if (normText(authorsText).includes(qNorm)) score += 0.4;
 
     s.scores[docId] = score;
@@ -1149,7 +1221,7 @@ function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
     const sa = s.scores[a];
     const sb = s.scores[b];
     if (sb !== sa) return sb - sa;
-    return meta.ids[b] - meta.ids[a];
+    return (s.metaIds[b] ?? 0) - (s.metaIds[a] ?? 0);
   });
 
   const all = Int32Array.from(candidates);
@@ -1166,6 +1238,27 @@ async function init(): Promise<void> {
   post({ type: "progress", stage: "加载索引清单…" });
   const manifest = await fetchJsonNoStore<Manifest>("/assets/manifest.json");
   const generatedAt = manifest.generatedAt;
+
+  const totalCount = Math.max(0, manifest.stats.count | 0);
+
+  const metaAssets: AssetRef[] = (() => {
+    const shards = manifest.assets.metaShards;
+    if (Array.isArray(shards) && shards.length > 0) return shards;
+    const single = manifest.assets.meta;
+    if (single) return [single];
+    throw new Error("manifest 缺少 meta/metaShards");
+  })();
+
+  const metaShardDocs = (() => {
+    const n = manifest.stats.metaShardDocs;
+    if (typeof n === "number" && n > 0) return n | 0;
+    return totalCount;
+  })();
+  const expectedMetaShardCount = metaShardDocs > 0 ? Math.ceil(totalCount / metaShardDocs) : 0;
+  if (expectedMetaShardCount > 0 && metaAssets.length !== expectedMetaShardCount) {
+    throw new Error(`manifest meta 分片数量不匹配：${metaAssets.length} != ${expectedMetaShardCount}`);
+  }
+
   const indexPlan: IndexPlan = (() => {
     const shards = manifest.assets.indexShards;
     if (Array.isArray(shards) && shards.length > 0) return { kind: "sharded", assets: shards };
@@ -1173,22 +1266,22 @@ async function init(): Promise<void> {
     if (single) return { kind: "single", asset: single };
     throw new Error("manifest 缺少 index/indexShards");
   })();
-  const keepKeys = new Set<string>([
-    manifest.assets.tags.sha256,
-    manifest.assets.meta.sha256,
-    manifest.assets.dict.sha256,
-  ]);
+  const keepKeys = new Set<string>([manifest.assets.tags.sha256, manifest.assets.dict.sha256]);
+  for (const a of metaAssets) keepKeys.add(a.sha256);
   if (indexPlan.kind === "single") keepKeys.add(indexPlan.asset.sha256);
   else for (const asset of indexPlan.assets) keepKeys.add(asset.sha256);
 
   post({ type: "progress", stage: "打开本地缓存…" });
   const db = await openDb();
 
-  post({ type: "progress", stage: "并发加载索引文件（tags/meta/dict）…" });
-  const [tagsBuf, metaBuf, dictBuf] = await Promise.all([
+  post({ type: "progress", stage: "加载索引文件（tags/dict/meta）…" });
+  const metaBufsPromise = loadAssetsBatched(db, metaAssets, 6, (done, total) => {
+    post({ type: "progress", stage: `加载 meta 分片…（${done}/${total}）` });
+  });
+  const [tagsBuf, dictBuf, metaBufs] = await Promise.all([
     loadAsset(db, manifest.assets.tags),
-    loadAsset(db, manifest.assets.meta),
     loadAsset(db, manifest.assets.dict),
+    metaBufsPromise,
   ]);
 
   const tagsJson = JSON.parse(decodeUtf8(tagsBuf)) as TagsJson;
@@ -1197,26 +1290,60 @@ async function init(): Promise<void> {
   const tagByBit: Array<{ tagId: number; name: string }> = [];
   for (const t of tags) tagByBit[t.bit] = { tagId: t.tagId, name: t.name };
 
-  const meta = parseMetaBin(metaBuf);
-
   const dict = parseDictBin(dictBuf);
+
+  const metaIds = new Int32Array(totalCount);
+  const metaTagLo = new Uint32Array(totalCount);
+  const metaTagHi = new Uint32Array(totalCount);
+  const metaFlags = new Uint8Array(totalCount);
+
+  const metaShards: MetaBin[] = [];
+  let off = 0;
+  let metaSep = "";
+  for (const buf of metaBufs) {
+    const shard = parseMetaBin(buf);
+    if (!metaSep) metaSep = shard.sep;
+    if (metaSep !== shard.sep) throw new Error("meta 分片 sep 不一致");
+    if (off + shard.count > totalCount) throw new Error("meta 分片条目数溢出");
+
+    metaIds.set(shard.ids, off);
+    metaTagLo.set(shard.tagLo, off);
+    metaTagHi.set(shard.tagHi, off);
+    metaFlags.set(shard.flags, off);
+
+    metaShards.push(shard);
+    off += shard.count;
+  }
+  if (off !== totalCount) throw new Error(`meta 分片条目数不匹配：${off} != ${totalCount}`);
+
+  const shift = shardShiftForDocs(metaShardDocs);
+  const mask = shift === null ? 0 : (metaShardDocs - 1) | 0;
 
   state = {
     db,
-    meta,
+    totalCount,
+    metaSep: metaSep || "\u001F",
+    metaShardDocs,
+    metaShardShift: shift,
+    metaShardMask: mask,
+    metaShards,
+    metaIds,
+    metaTagLo,
+    metaTagHi,
+    metaFlags,
     tags,
     tagByBit,
     dict,
     indexPlan,
     indexCache: new Map<number, Uint8Array>(),
     indexInflight: new Map<number, Promise<Uint8Array>>(),
-    counts: new Uint16Array(meta.count),
-    scores: new Float32Array(meta.count),
+    counts: new Uint16Array(totalCount),
+    scores: new Float32Array(totalCount),
     touched: [],
     cache: null,
   };
 
-  post({ type: "ready", count: meta.count, tags, generatedAt });
+  post({ type: "ready", count: totalCount, tags, generatedAt });
 
   // 新索引已可用后再后台清理旧缓存，并预热索引文件（不阻塞首屏可用性）。
   setTimeout(() => {
