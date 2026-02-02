@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 
 DEFAULT_DB_PATH = Path("data/zaimanhua.sqlite3")
@@ -90,6 +91,42 @@ def _pad4(out: bytearray) -> None:
         out.append(0)
 
 
+def _split_cover_url(raw: str) -> Tuple[str, str]:
+    s = (raw or "").strip()
+    if not s:
+        return ("", "")
+
+    if s.startswith("//"):
+        s = "https:" + s
+
+    if s.startswith("http://") or s.startswith("https://"):
+        try:
+            u = urlsplit(s)
+        except ValueError:
+            return ("", s)
+        if not u.netloc:
+            return ("", s)
+        base = f"{u.scheme}://{u.netloc}"
+        path = u.path or ""
+        if u.query:
+            path = f"{path}?{u.query}"
+        return (base, path)
+
+    if s.startswith("/"):
+        # 站内绝对路径：直接当作可用路径（base 为空）
+        return ("", s)
+
+    if "://" in s:
+        # 未知 scheme（如 data:），直接保留
+        return ("", s)
+
+    # 兼容旧数据：host/path（无 scheme），默认按 https:// 处理
+    host, sep, rest = s.partition("/")
+    if not sep:
+        return ("https://" + host, "")
+    return ("https://" + host, "/" + rest)
+
+
 def _pack_meta_bin(
     ids: List[int],
     titles: List[str],
@@ -113,8 +150,25 @@ def _pack_meta_bin(
     ):
         raise RuntimeError("meta 字段长度不一致")
 
+    cover_bases = [""]
+    cover_base_idx = {"": 0}
+    cover_paths: List[str] = []
+    cover_base_ids: List[int] = []
+
+    for raw in covers:
+        base, path = _split_cover_url(raw)
+        if base not in cover_base_idx:
+            cover_base_idx[base] = len(cover_bases)
+            cover_bases.append(base)
+        cover_base_ids.append(cover_base_idx[base])
+        cover_paths.append(path)
+
+    base_count = len(cover_bases)
+    idx_bytes = 1 if base_count <= 0xFF else 2
+
     out = bytearray()
-    out.extend(struct.pack("<4sHHII", b"ZMHm", 1, ord(sep), count, 0))
+    # meta v2：header 的最后一个 uint32 复用为 coverBaseCount
+    out.extend(struct.pack("<4sHHII", b"ZMHm", 2, ord(sep), count, base_count))
 
     ids_arr = array("i", ids)
     if ids_arr.itemsize != 4:
@@ -131,7 +185,43 @@ def _pack_meta_bin(
     out.extend(bytes(flags))
     _pad4(out)
 
-    for strings in (titles, covers, author_texts, alias_texts):
+    # titles pool（count + 1 offsets）
+    offsets, pool = _build_string_pool(titles)
+    if offsets.itemsize != 4:
+        raise RuntimeError("offsets itemsize != 4")
+    out.extend(offsets.tobytes())
+    out.extend(pool)
+    _pad4(out)
+
+    # cover base pool（base_count + 1 offsets）
+    base_offsets, base_pool = _build_string_pool(cover_bases)
+    if base_offsets.itemsize != 4:
+        raise RuntimeError("offsets itemsize != 4")
+    out.extend(base_offsets.tobytes())
+    out.extend(base_pool)
+    _pad4(out)
+
+    # cover base index（per doc）
+    if idx_bytes == 1:
+        if any(i < 0 or i > 0xFF for i in cover_base_ids):
+            raise RuntimeError("cover base index 超出 uint8 范围")
+        out.extend(bytes(cover_base_ids))
+    else:
+        idx_arr = array("H", cover_base_ids)
+        if idx_arr.itemsize != 2:
+            raise RuntimeError("array('H') itemsize != 2")
+        out.extend(idx_arr.tobytes())
+    _pad4(out)
+
+    # cover path pool（count + 1 offsets）
+    cover_offsets, cover_pool = _build_string_pool(cover_paths)
+    if cover_offsets.itemsize != 4:
+        raise RuntimeError("offsets itemsize != 4")
+    out.extend(cover_offsets.tobytes())
+    out.extend(cover_pool)
+    _pad4(out)
+
+    for strings in (author_texts, alias_texts):
         offsets, pool = _build_string_pool(strings)
         if offsets.itemsize != 4:
             raise RuntimeError("offsets itemsize != 4")
@@ -149,6 +239,17 @@ def _pack_dict_bin(n: int, entries: List[Tuple[int, int, int, int]]) -> bytes:
     out.extend(array("I", [o for (_, o, _, _) in entries]).tobytes())
     out.extend(array("I", [l for (_, _, l, _) in entries]).tobytes())
     out.extend(array("I", [df for (_, _, _, df) in entries]).tobytes())
+    return bytes(out)
+
+
+def _pack_dict_bin_v2(n: int, entries: List[Tuple[int, int, int, int, int]]) -> bytes:
+    out = bytearray()
+    out.extend(struct.pack("<4sHHII", b"ZMHd", 2, n, len(entries), 0))
+    out.extend(array("I", [k for (k, _, _, _, _) in entries]).tobytes())
+    out.extend(array("I", [s for (_, s, _, _, _) in entries]).tobytes())
+    out.extend(array("I", [o for (_, _, o, _, _) in entries]).tobytes())
+    out.extend(array("I", [l for (_, _, _, l, _) in entries]).tobytes())
+    out.extend(array("I", [df for (_, _, _, _, df) in entries]).tobytes())
     return bytes(out)
 
 
@@ -226,7 +327,7 @@ def _collect_tags(conn: sqlite3.Connection) -> List[TagInfo]:
     return infos
 
 
-def _build(conn: sqlite3.Connection) -> Tuple[bytes, bytes, bytes, dict, dict]:
+def _build(conn: sqlite3.Connection, index_shard_bytes: int) -> Tuple[bytes, List[bytes], bytes, dict, dict]:
     tags = _collect_tags(conn)
     tag_bit_by_id = {t.tag_id: t.bit for t in tags}
 
@@ -382,7 +483,34 @@ def _build(conn: sqlite3.Connection) -> Tuple[bytes, bytes, bytes, dict, dict]:
         index_out.extend(data)
         offset += len(data)
 
-    dict_bin = _pack_dict_bin(NGRAM_N, entries)
+    if index_shard_bytes and index_shard_bytes > 0 and len(index_out) > index_shard_bytes:
+        shards: List[bytes] = []
+        current = bytearray()
+        shard_id = 0
+        entries_v2: List[Tuple[int, int, int, int, int]] = []
+        for (key, off, length, df) in entries:
+            if len(current) > 0 and (len(current) + length) > index_shard_bytes:
+                shards.append(bytes(current))
+                current = bytearray()
+                shard_id += 1
+
+            local_off = len(current)
+            current.extend(index_out[off : off + length])
+            entries_v2.append((key, shard_id, local_off, length, df))
+
+        if len(current) > 0:
+            shards.append(bytes(current))
+
+        dict_bin = _pack_dict_bin_v2(NGRAM_N, entries_v2)
+        index_parts = shards
+        stats_version = 2
+        stats_extra = {"indexShardBytes": index_shard_bytes, "indexShardCount": len(shards)}
+    else:
+        dict_bin = _pack_dict_bin(NGRAM_N, entries)
+        index_parts = [bytes(index_out)]
+        stats_version = 1
+        stats_extra = {}
+
     meta_bin = _pack_meta_bin(
         ids=ids,
         titles=titles,
@@ -396,16 +524,17 @@ def _build(conn: sqlite3.Connection) -> Tuple[bytes, bytes, bytes, dict, dict]:
     )
 
     stats = {
-        "version": 1,
+        "version": stats_version,
         "count": len(ids),
         "uniqueTokens": len(entries),
         "indexBytes": len(index_out),
+        **stats_extra,
     }
 
     if skipped > 0:
         print(f"提示：有 {skipped} 个 token 无法编码为 utf-16 2-unit key，已跳过", file=sys.stderr)
 
-    return meta_bin, bytes(index_out), dict_bin, tags_json, stats
+    return meta_bin, index_parts, dict_bin, tags_json, stats
 
 
 def _parse_args(argv: List[str]):
@@ -431,6 +560,12 @@ def _parse_args(argv: List[str]):
         action="store_true",
         help="生成完成后清理 out_dir 中旧的索引产物（仅删除 meta-lite.* / ngram.* / tags.*）。",
     )
+    parser.add_argument(
+        "--index-shard-bytes",
+        type=int,
+        default=1024 * 1024,
+        help="将 ngram.index 分片的目标大小（bytes）。设为 0 表示不分片。默认：1048576（1MiB）。",
+    )
     return parser.parse_args(argv)
 
 
@@ -439,6 +574,7 @@ def main() -> int:
     db_path = Path(args.db)
     out_dir = Path(args.out_dir)
     generated_at = (args.generated_at or "").strip() or datetime.now(timezone.utc).isoformat()
+    index_shard_bytes = int(getattr(args, "index_shard_bytes", 0) or 0)
 
     if not db_path.exists():
         print(f"找不到数据库文件：{db_path.as_posix()}", file=sys.stderr)
@@ -448,7 +584,7 @@ def main() -> int:
 
     conn = sqlite3.connect(db_path.as_posix())
     try:
-        meta_bin, index_bin, dict_bin, tags_json, stats = _build(conn)
+        meta_bin, index_parts, dict_bin, tags_json, stats = _build(conn, index_shard_bytes=index_shard_bytes)
     finally:
         conn.close()
 
@@ -459,23 +595,37 @@ def main() -> int:
     meta_name, meta_sha, meta_size = _write_hashed(out_dir, "meta-lite", ".bin", meta_bytes)
     dict_name, dict_sha, dict_size = _write_hashed(out_dir, "ngram.dict", ".bin", dict_bytes)
     tags_name, tags_sha, tags_size = _write_hashed(out_dir, "tags", ".json", tags_bytes)
-    index_name, index_sha, index_size = _write_hashed(out_dir, "ngram.index", ".bin", index_bin)
+
+    index_assets = []
+    if stats.get("version") == 2:
+        for i, data in enumerate(index_parts):
+            name, sha, size = _write_hashed(out_dir, f"ngram.index.s{i:03d}", ".bin", data)
+            index_assets.append({"path": f"assets/{name}", "sha256": sha, "bytes": size})
+    else:
+        (index_bin,) = index_parts
+        index_name, index_sha, index_size = _write_hashed(out_dir, "ngram.index", ".bin", index_bin)
+        index_assets.append({"path": f"assets/{index_name}", "sha256": index_sha, "bytes": index_size})
 
     manifest = {
-        "version": 1,
+        "version": 2,
         "generatedAt": generated_at,
         "stats": stats,
         "assets": {
             "meta": {"path": f"assets/{meta_name}", "sha256": meta_sha, "bytes": meta_size},
             "dict": {"path": f"assets/{dict_name}", "sha256": dict_sha, "bytes": dict_size},
             "tags": {"path": f"assets/{tags_name}", "sha256": tags_sha, "bytes": tags_size},
-            "index": {"path": f"assets/{index_name}", "sha256": index_sha, "bytes": index_size},
+            **(
+                {"indexShards": index_assets}
+                if int(stats.get("version") or 1) == 2
+                else {"index": index_assets[0]}
+            ),
         },
     }
 
     (out_dir / "manifest.json").write_bytes(_json_bytes(manifest))
 
     if args.clean:
+        keep_index_names = [a["path"].split("/")[-1] for a in index_assets]
         _clean_generated(
             out_dir,
             keep=[
@@ -484,7 +634,7 @@ def main() -> int:
                 meta_name,
                 dict_name,
                 tags_name,
-                index_name,
+                *keep_index_names,
             ],
         )
 
@@ -493,7 +643,8 @@ def main() -> int:
     print(f"- {out_dir.as_posix()}/{meta_name}")
     print(f"- {out_dir.as_posix()}/{dict_name}")
     print(f"- {out_dir.as_posix()}/{tags_name}")
-    print(f"- {out_dir.as_posix()}/{index_name}")
+    for a in index_assets:
+        print(f"- {out_dir.as_posix()}/{a['path'].split('/')[-1]}")
     print(f"- 条目数：{stats['count']}，token：{stats['uniqueTokens']}，index：{stats['indexBytes']} bytes")
     return 0
 

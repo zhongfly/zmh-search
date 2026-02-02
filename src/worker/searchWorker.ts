@@ -3,12 +3,20 @@ type AssetRef = { path: string; sha256: string; bytes: number };
 type Manifest = {
   version: number;
   generatedAt: string;
-  stats: { count: number; uniqueTokens: number; indexBytes: number; version: number };
+  stats: {
+    version: number;
+    count: number;
+    uniqueTokens: number;
+    indexBytes: number;
+    indexShardBytes?: number;
+    indexShardCount?: number;
+  };
   assets: {
     meta: AssetRef;
     dict: AssetRef;
     tags: AssetRef;
-    index: AssetRef;
+    index?: AssetRef;
+    indexShards?: AssetRef[];
   };
 };
 
@@ -17,13 +25,28 @@ type TagsJson = {
   tags: Array<{ tagId: number; name: string; count: number; bit: number }>;
 };
 
-type DictBin = {
+type DictBinV1 = {
+  version: 1;
   n: number;
   keys: Uint32Array;
   offsets: Uint32Array;
   lengths: Uint32Array;
   dfs: Uint32Array;
 };
+
+type DictBinV2 = {
+  version: 2;
+  n: number;
+  keys: Uint32Array;
+  shardIds: Uint32Array;
+  offsets: Uint32Array;
+  lengths: Uint32Array;
+  dfs: Uint32Array;
+};
+
+type DictBin = DictBinV1 | DictBinV2;
+
+type IndexPlan = { kind: "single"; asset: AssetRef } | { kind: "sharded"; assets: AssetRef[] };
 
 type MetaBin = {
   count: number;
@@ -34,8 +57,11 @@ type MetaBin = {
   flags: Uint8Array;
   titlesOffsets: Uint32Array;
   titlesPool: Uint8Array;
-  coversOffsets: Uint32Array;
-  coversPool: Uint8Array;
+  coverBaseOffsets: Uint32Array;
+  coverBasePool: Uint8Array;
+  coverBaseIds: Uint16Array;
+  coverPathsOffsets: Uint32Array;
+  coverPathsPool: Uint8Array;
   authorsOffsets: Uint32Array;
   authorsPool: Uint8Array;
   aliasesOffsets: Uint32Array;
@@ -177,14 +203,14 @@ function idbPrune(db: IDBDatabase, keepKeys: Set<string>): Promise<number> {
   });
 }
 
-async function fetchArrayBuffer(url: string): Promise<ArrayBuffer> {
-  const res = await fetch(url, { cache: "no-store" });
+async function fetchArrayBuffer(url: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+  const res = await fetch(url, signal ? { signal } : undefined);
   if (!res.ok) throw new Error(`请求失败：${res.status} ${res.statusText}`);
   return await res.arrayBuffer();
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { cache: "no-store" });
+async function fetchJsonNoStore<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(url, { cache: "no-store", signal });
   if (!res.ok) throw new Error(`请求失败：${res.status} ${res.statusText}`);
   return (await res.json()) as T;
 }
@@ -205,12 +231,14 @@ async function maybeGunzipArrayBuffer(buf: ArrayBuffer): Promise<ArrayBuffer> {
   return await new Response(stream).arrayBuffer();
 }
 
-async function loadAsset(db: IDBDatabase, asset: AssetRef): Promise<ArrayBuffer> {
+async function loadAsset(db: IDBDatabase, asset: AssetRef, signal?: AbortSignal): Promise<ArrayBuffer> {
   const cached = await idbGet(db, asset.sha256);
   if (cached) return cached;
-  const buf = await fetchArrayBuffer(`/${asset.path}`);
+  const buf = await fetchArrayBuffer(`/${asset.path}`, signal);
   const decoded = await maybeGunzipArrayBuffer(buf);
-  await idbPut(db, asset.sha256, decoded);
+  void idbPut(db, asset.sha256, decoded).catch(() => {
+    // 写入失败不影响主流程
+  });
   return decoded;
 }
 
@@ -319,10 +347,11 @@ function parseMetaBin(buf: ArrayBuffer): MetaBin {
 
   const view = new DataView(buf);
   const version = view.getUint16(4, true);
-  if (version !== 1) throw new Error(`meta version 不支持：${version}`);
+  if (version !== 2) throw new Error(`meta version 不支持：${version}`);
 
   const sepCode = view.getUint16(6, true);
   const count = view.getUint32(8, true);
+  const coverBaseCount = view.getUint32(12, true);
 
   let off = 16;
   const ids = new Int32Array(buf, off, count);
@@ -335,23 +364,42 @@ function parseMetaBin(buf: ArrayBuffer): MetaBin {
   off += count;
   off = align4(off);
 
-  function readPool(): { offsets: Uint32Array; pool: Uint8Array; next: number } {
-    const offsets = new Uint32Array(buf, off, count + 1);
-    off += (count + 1) * 4;
-    const poolLen = offsets[count] ?? 0;
+  function readPool(n: number): { offsets: Uint32Array; pool: Uint8Array; next: number } {
+    const offsets = new Uint32Array(buf, off, n + 1);
+    off += (n + 1) * 4;
+    const poolLen = offsets[n] ?? 0;
     const pool = new Uint8Array(buf, off, poolLen);
     off += poolLen;
     off = align4(off);
     return { offsets, pool, next: off };
   }
 
-  const titles = readPool();
+  const titles = readPool(count);
   off = titles.next;
-  const covers = readPool();
-  off = covers.next;
-  const authors = readPool();
+  const coverBases = readPool(coverBaseCount);
+  off = coverBases.next;
+
+  const idxBytes = coverBaseCount <= 0xff ? 1 : 2;
+  let coverBaseIds: Uint16Array;
+  if (idxBytes === 1) {
+    const ids8 = new Uint8Array(buf, off, count);
+    off += count;
+    off = align4(off);
+    const ids16 = new Uint16Array(count);
+    for (let i = 0; i < count; i += 1) ids16[i] = ids8[i] ?? 0;
+    coverBaseIds = ids16;
+  } else {
+    coverBaseIds = new Uint16Array(buf, off, count);
+    off += count * 2;
+    off = align4(off);
+  }
+
+  const coverPaths = readPool(count);
+  off = coverPaths.next;
+
+  const authors = readPool(count);
   off = authors.next;
-  const aliases = readPool();
+  const aliases = readPool(count);
 
   return {
     count,
@@ -362,8 +410,11 @@ function parseMetaBin(buf: ArrayBuffer): MetaBin {
     flags,
     titlesOffsets: titles.offsets,
     titlesPool: titles.pool,
-    coversOffsets: covers.offsets,
-    coversPool: covers.pool,
+    coverBaseOffsets: coverBases.offsets,
+    coverBasePool: coverBases.pool,
+    coverBaseIds,
+    coverPathsOffsets: coverPaths.offsets,
+    coverPathsPool: coverPaths.pool,
     authorsOffsets: authors.offsets,
     authorsPool: authors.pool,
     aliasesOffsets: aliases.offsets,
@@ -380,28 +431,42 @@ function parseDictBin(buf: ArrayBuffer): DictBin {
 
   const view = new DataView(buf);
   const version = view.getUint16(4, true);
-  if (version !== 1) throw new Error(`dict version 不支持：${version}`);
   const n = view.getUint16(6, true);
   const count = view.getUint32(8, true);
 
   let off = 16;
   const keys = new Uint32Array(buf, off, count);
   off += count * 4;
-  const offsets = new Uint32Array(buf, off, count);
-  off += count * 4;
-  const lengths = new Uint32Array(buf, off, count);
-  off += count * 4;
-  const dfs = new Uint32Array(buf, off, count);
-
-  return { n, keys, offsets, lengths, dfs };
+  if (version === 1) {
+    const offsets = new Uint32Array(buf, off, count);
+    off += count * 4;
+    const lengths = new Uint32Array(buf, off, count);
+    off += count * 4;
+    const dfs = new Uint32Array(buf, off, count);
+    return { version: 1, n, keys, offsets, lengths, dfs };
+  }
+  if (version === 2) {
+    const shardIds = new Uint32Array(buf, off, count);
+    off += count * 4;
+    const offsets = new Uint32Array(buf, off, count);
+    off += count * 4;
+    const lengths = new Uint32Array(buf, off, count);
+    off += count * 4;
+    const dfs = new Uint32Array(buf, off, count);
+    return { version: 2, n, keys, shardIds, offsets, lengths, dfs };
+  }
+  throw new Error(`dict version 不支持：${version}`);
 }
 
 type LoadedState = {
+  db: IDBDatabase;
   meta: MetaBin;
   tags: TagsJson["tags"];
   tagByBit: Array<{ tagId: number; name: string }>;
   dict: DictBin;
-  index: Uint8Array;
+  indexPlan: IndexPlan;
+  indexCache: Map<number, Uint8Array>;
+  indexInflight: Map<number, Promise<Uint8Array>>;
   counts: Uint16Array;
   scores: Float32Array;
   touched: number[];
@@ -409,6 +474,109 @@ type LoadedState = {
 };
 
 let state: LoadedState | null = null;
+
+function indexShardCount(plan: IndexPlan): number {
+  return plan.kind === "single" ? 1 : plan.assets.length;
+}
+
+function getIndexAsset(plan: IndexPlan, shardId: number): AssetRef {
+  if (plan.kind === "single") {
+    if (shardId !== 0) throw new Error(`索引分片不存在：${shardId}`);
+    return plan.asset;
+  }
+  const asset = plan.assets[shardId];
+  if (!asset) throw new Error(`索引分片不存在：${shardId}`);
+  return asset;
+}
+
+function dictShardId(dict: DictBin, tokenIdx: number): number {
+  return dict.version === 2 ? dict.shardIds[tokenIdx] ?? 0 : 0;
+}
+
+function decodeTokenIdxPostings(
+  s: LoadedState,
+  tokenIdx: number,
+  onDoc: (docId: number) => void,
+): void {
+  const shardId = dictShardId(s.dict, tokenIdx);
+  const index = s.indexCache.get(shardId);
+  if (!index) throw new Error("索引尚未加载");
+  const o = s.dict.offsets[tokenIdx] ?? 0;
+  const l = s.dict.lengths[tokenIdx] ?? 0;
+  decodePostings(index, o, l, onDoc);
+}
+
+async function loadIndexShard(
+  s: LoadedState,
+  shardId: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const cached = s.indexCache.get(shardId);
+  if (cached) return cached;
+
+  const inflight = s.indexInflight.get(shardId);
+  if (inflight) return await inflight;
+
+  const p = (async () => {
+    const asset = getIndexAsset(s.indexPlan, shardId);
+    const buf = await loadAsset(s.db, asset, signal);
+    const u8 = new Uint8Array(buf);
+    s.indexCache.set(shardId, u8);
+    return u8;
+  })();
+
+  s.indexInflight.set(shardId, p);
+  try {
+    return await p;
+  } finally {
+    s.indexInflight.delete(shardId);
+  }
+}
+
+async function ensureIndexForTokenIdxs(
+  s: LoadedState,
+  tokenIdxs: number[],
+  signal?: AbortSignal,
+): Promise<void> {
+  if (tokenIdxs.length === 0) return;
+  if (s.dict.version === 1 && s.indexPlan.kind === "sharded") {
+    throw new Error("dict v1 与 index 分片不兼容，请重新生成索引。");
+  }
+  const shardIds = new Set<number>();
+  for (const idx of tokenIdxs) shardIds.add(dictShardId(s.dict, idx));
+  await Promise.all([...shardIds].map((id) => loadIndexShard(s, id, signal)));
+}
+
+async function preloadIndex(s: LoadedState): Promise<void> {
+  if (s.dict.version === 1 && s.indexPlan.kind === "sharded") return;
+  const total = indexShardCount(s.indexPlan);
+  if (total <= 0) return;
+
+  const concurrency = Math.min(2, total);
+  let next = 0;
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (next < total) {
+      const shardId = next;
+      next += 1;
+      await loadIndexShard(s, shardId);
+    }
+  });
+  await Promise.all(workers);
+}
+
+function shouldPreloadIndex(): boolean {
+  try {
+    const conn = (navigator as any).connection as
+      | { saveData?: boolean; effectiveType?: string }
+      | undefined;
+    if (conn?.saveData) return false;
+    const t = String(conn?.effectiveType ?? "");
+    if (t === "slow-2g" || t === "2g") return false;
+  } catch {
+    // ignore
+  }
+  return true;
+}
 
 function passesFilters(
   meta: LoadedState["meta"],
@@ -496,13 +664,11 @@ function buildItem(s: LoadedState, docId: number): ResultItem {
   const isLock = (f & 8) !== 0;
 
   const title = decodeString(m.titlesPool, m.titlesOffsets, docId);
-  const coverPart = decodeString(m.coversPool, m.coversOffsets, docId);
-  const cover =
-    coverPart.length === 0
-      ? ""
-      : coverPart.startsWith("http://") || coverPart.startsWith("https://")
-        ? coverPart
-        : `https://${coverPart}`;
+  const coverPath = decodeString(m.coverPathsPool, m.coverPathsOffsets, docId);
+  const coverBaseId = m.coverBaseIds[docId] ?? 0;
+  const coverBase =
+    coverBaseId === 0 ? "" : decodeString(m.coverBasePool, m.coverBaseOffsets, coverBaseId);
+  const cover = coverBase.length > 0 ? `${coverBase}${coverPath}` : coverPath;
 
   const aliasesText = decodeString(m.aliasesPool, m.aliasesOffsets, docId);
   const authorsText = decodeString(m.authorsPool, m.authorsOffsets, docId);
@@ -552,9 +718,7 @@ function buildExcludeMask(s: LoadedState, excludeTerms: string[]): Uint8Array {
     const minHitClamped = Math.min(minHit, tokenIdxs.length);
 
     for (const idx of tokenIdxs) {
-      const o = s.dict.offsets[idx];
-      const l = s.dict.lengths[idx];
-      decodePostings(s.index, o, l, (docId) => {
+      decodeTokenIdxPostings(s, idx, (docId) => {
         if (mask[docId] === 1) return;
         const prev = s.counts[docId];
         if (prev === 0) termTouched.push(docId);
@@ -572,7 +736,43 @@ function buildExcludeMask(s: LoadedState, excludeTerms: string[]): Uint8Array {
   return mask;
 }
 
-function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
+function collectTokenIdxs(dict: DictBin, terms: string[]): number[] {
+  const idxs = new Set<number>();
+  for (const term of terms) {
+    const tokens = uniqNgrams(term, dict.n);
+    for (const token of tokens) {
+      const key = tokenKey(token);
+      if (key === null) continue;
+      const idx = findKey(dict.keys, key);
+      if (idx < 0) continue;
+      idxs.add(idx);
+    }
+  }
+  return [...idxs];
+}
+
+async function searchAsync(
+  s: LoadedState,
+  msg: SearchMessage,
+  signal?: AbortSignal,
+): Promise<ResultsMessage> {
+  const { include: includeTerms, exclude: excludeTerms } = parseQuery(msg.q);
+  if (includeTerms.length === 0 && excludeTerms.length === 0) return searchSync(s, msg);
+
+  const tokenIdxs = collectTokenIdxs(s.dict, [...includeTerms, ...excludeTerms]);
+  if (tokenIdxs.length > 0) {
+    const shardIds = new Set<number>();
+    for (const idx of tokenIdxs) shardIds.add(dictShardId(s.dict, idx));
+    let needLoad = 0;
+    for (const shardId of shardIds) if (!s.indexCache.has(shardId)) needLoad += 1;
+    if (needLoad > 0) post({ type: "progress", stage: "加载索引缓存…" });
+  }
+
+  await ensureIndexForTokenIdxs(s, tokenIdxs, signal);
+  return searchSync(s, msg);
+}
+
+function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
   const meta = s.meta;
   const { include: includeTerms, exclude: excludeTerms } = parseQuery(msg.q);
   const qNorm = includeTerms.length === 1 ? includeTerms[0] : "";
@@ -758,9 +958,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
       const minHitClamped = Math.min(minHit, tokenIdxs.length);
 
       for (const idx of tokenIdxs) {
-        const o = s.dict.offsets[idx];
-        const l = s.dict.lengths[idx];
-        decodePostings(s.index, o, l, (docId) => {
+        decodeTokenIdxPostings(s, idx, (docId) => {
           if (excludeMask && excludeMask[docId] === 1) return;
           if (
             !passesFilters(
@@ -878,9 +1076,7 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
   const minHitClamped = Math.min(minHit, tokenIdxs.length);
 
   for (const idx of tokenIdxs) {
-    const o = s.dict.offsets[idx];
-    const l = s.dict.lengths[idx];
-    decodePostings(s.index, o, l, (docId) => {
+    decodeTokenIdxPostings(s, idx, (docId) => {
       if (excludeMask && excludeMask[docId] === 1) return;
       if (
         !passesFilters(
@@ -968,20 +1164,31 @@ function search(s: LoadedState, msg: SearchMessage): ResultsMessage {
 
 async function init(): Promise<void> {
   post({ type: "progress", stage: "加载索引清单…" });
-  const manifest = await fetchJson<Manifest>("/assets/manifest.json");
+  const manifest = await fetchJsonNoStore<Manifest>("/assets/manifest.json");
   const generatedAt = manifest.generatedAt;
-  const keepKeys = new Set<string>();
-  for (const asset of Object.values(manifest.assets) as AssetRef[]) keepKeys.add(asset.sha256);
+  const indexPlan: IndexPlan = (() => {
+    const shards = manifest.assets.indexShards;
+    if (Array.isArray(shards) && shards.length > 0) return { kind: "sharded", assets: shards };
+    const single = manifest.assets.index;
+    if (single) return { kind: "single", asset: single };
+    throw new Error("manifest 缺少 index/indexShards");
+  })();
+  const keepKeys = new Set<string>([
+    manifest.assets.tags.sha256,
+    manifest.assets.meta.sha256,
+    manifest.assets.dict.sha256,
+  ]);
+  if (indexPlan.kind === "single") keepKeys.add(indexPlan.asset.sha256);
+  else for (const asset of indexPlan.assets) keepKeys.add(asset.sha256);
 
   post({ type: "progress", stage: "打开本地缓存…" });
   const db = await openDb();
 
-  post({ type: "progress", stage: "并发加载索引文件（tags/meta/dict/index）…" });
-  const [tagsBuf, metaBuf, dictBuf, indexBuf] = await Promise.all([
+  post({ type: "progress", stage: "并发加载索引文件（tags/meta/dict）…" });
+  const [tagsBuf, metaBuf, dictBuf] = await Promise.all([
     loadAsset(db, manifest.assets.tags),
     loadAsset(db, manifest.assets.meta),
     loadAsset(db, manifest.assets.dict),
-    loadAsset(db, manifest.assets.index),
   ]);
 
   const tagsJson = JSON.parse(decodeUtf8(tagsBuf)) as TagsJson;
@@ -994,14 +1201,15 @@ async function init(): Promise<void> {
 
   const dict = parseDictBin(dictBuf);
 
-  const index = new Uint8Array(indexBuf);
-
   state = {
+    db,
     meta,
     tags,
     tagByBit,
     dict,
-    index,
+    indexPlan,
+    indexCache: new Map<number, Uint8Array>(),
+    indexInflight: new Map<number, Promise<Uint8Array>>(),
     counts: new Uint16Array(meta.count),
     scores: new Float32Array(meta.count),
     touched: [],
@@ -1010,12 +1218,55 @@ async function init(): Promise<void> {
 
   post({ type: "ready", count: meta.count, tags, generatedAt });
 
-  // 新索引已可用后再后台清理旧缓存，避免阻塞首屏可用性。
+  // 新索引已可用后再后台清理旧缓存，并预热索引文件（不阻塞首屏可用性）。
   setTimeout(() => {
     void idbPrune(db, keepKeys).catch(() => {
       // 清理失败不影响主流程
     });
+    const s = state;
+    if (!s) return;
+    if (!shouldPreloadIndex()) return;
+    setTimeout(() => {
+      void preloadIndex(s).catch(() => {});
+    }, 800);
   }, 0);
+}
+
+let searching = false;
+let pendingSearch: SearchMessage | null = null;
+let activeSearchAbort: AbortController | null = null;
+
+function requestSearch(msg: SearchMessage): void {
+  pendingSearch = msg;
+  activeSearchAbort?.abort();
+  if (!searching) void runSearchLoop();
+}
+
+async function runSearchLoop(): Promise<void> {
+  if (searching) return;
+  searching = true;
+  try {
+    while (pendingSearch) {
+      const msg = pendingSearch;
+      pendingSearch = null;
+      if (!state) return;
+
+      const ac = new AbortController();
+      activeSearchAbort = ac;
+
+      try {
+        const result = await searchAsync(state, msg, ac.signal);
+        // 若等待期间出现新请求，跳过旧结果（主线程也会按 requestId 丢弃）。
+        if (pendingSearch) continue;
+        post(result);
+      } catch (err) {
+        if (ac.signal.aborted) continue;
+        post({ type: "progress", stage: `搜索失败：${String(err)}` });
+      }
+    }
+  } finally {
+    searching = false;
+  }
 }
 
 // eslint-disable-next-line no-restricted-globals
@@ -1037,6 +1288,6 @@ self.onmessage = (ev: MessageEvent<InMessage>) => {
   }
   if (msg.type === "search") {
     if (!state) return;
-    post(search(state, msg));
+    requestSearch(msg);
   }
 };
