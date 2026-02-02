@@ -146,6 +146,37 @@ function idbPut(db: IDBDatabase, key: string, data: ArrayBuffer): Promise<void> 
   });
 }
 
+function idbPrune(db: IDBDatabase, keepKeys: Set<string>): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_FILES, "readwrite");
+    const store = tx.objectStore(STORE_FILES);
+    let removed = 0;
+
+    const req = store.openCursor();
+    req.onerror = () => reject(req.error ?? new Error("IndexedDB 清理失败"));
+    req.onsuccess = () => {
+      const cursor = req.result as IDBCursorWithValue | null;
+      if (!cursor) return;
+
+      const key = String(cursor.key);
+      if (keepKeys.has(key)) {
+        cursor.continue();
+        return;
+      }
+
+      const delReq = cursor.delete();
+      delReq.onerror = () => reject(delReq.error ?? new Error("IndexedDB 清理失败"));
+      delReq.onsuccess = () => {
+        removed += 1;
+        cursor.continue();
+      };
+    };
+
+    tx.oncomplete = () => resolve(removed);
+    tx.onerror = () => reject(tx.error ?? new Error("IndexedDB 清理失败"));
+  });
+}
+
 async function fetchArrayBuffer(url: string): Promise<ArrayBuffer> {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`请求失败：${res.status} ${res.statusText}`);
@@ -939,6 +970,8 @@ async function init(): Promise<void> {
   post({ type: "progress", stage: "加载索引清单…" });
   const manifest = await fetchJson<Manifest>("/assets/manifest.json");
   const generatedAt = manifest.generatedAt;
+  const keepKeys = new Set<string>();
+  for (const asset of Object.values(manifest.assets) as AssetRef[]) keepKeys.add(asset.sha256);
 
   post({ type: "progress", stage: "打开本地缓存…" });
   const db = await openDb();
@@ -976,6 +1009,13 @@ async function init(): Promise<void> {
   };
 
   post({ type: "ready", count: meta.count, tags, generatedAt });
+
+  // 新索引已可用后再后台清理旧缓存，避免阻塞首屏可用性。
+  setTimeout(() => {
+    void idbPrune(db, keepKeys).catch(() => {
+      // 清理失败不影响主流程
+    });
+  }, 0);
 }
 
 // eslint-disable-next-line no-restricted-globals
