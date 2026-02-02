@@ -278,15 +278,10 @@ function decodeUtf8(buf: ArrayBuffer): string {
   return DECODER.decode(buf);
 }
 
-const ALNUM_RE = /[\p{Letter}\p{Number}]/u;
+const NON_ALNUM_RE = /[^\p{Letter}\p{Number}]+/gu;
 function normText(text: string): string {
   if (!text) return "";
-  const t = text.normalize("NFKC").toLowerCase();
-  let out = "";
-  for (const ch of t) {
-    if (ALNUM_RE.test(ch)) out += ch;
-  }
-  return out;
+  return text.normalize("NFKC").toLowerCase().replace(NON_ALNUM_RE, "");
 }
 
 type ParsedQuery = { include: string[]; exclude: string[] };
@@ -818,8 +813,9 @@ async function searchAsync(
   msg: SearchMessage,
   signal?: AbortSignal,
 ): Promise<ResultsMessage> {
-  const { include: includeTerms, exclude: excludeTerms } = parseQuery(msg.q);
-  if (includeTerms.length === 0 && excludeTerms.length === 0) return searchSync(s, msg);
+  const parsed = parseQuery(msg.q);
+  const { include: includeTerms, exclude: excludeTerms } = parsed;
+  if (includeTerms.length === 0 && excludeTerms.length === 0) return searchSync(s, msg, parsed);
 
   const tokenIdxs = collectTokenIdxs(s.dict, [...includeTerms, ...excludeTerms]);
   if (tokenIdxs.length > 0) {
@@ -831,12 +827,12 @@ async function searchAsync(
   }
 
   await ensureIndexForTokenIdxs(s, tokenIdxs, signal);
-  return searchSync(s, msg);
+  return searchSync(s, msg, parsed);
 }
 
-function searchSync(s: LoadedState, msg: SearchMessage): ResultsMessage {
+function searchSync(s: LoadedState, msg: SearchMessage, parsed?: ParsedQuery): ResultsMessage {
   const totalCount = s.totalCount;
-  const { include: includeTerms, exclude: excludeTerms } = parseQuery(msg.q);
+  const { include: includeTerms, exclude: excludeTerms } = parsed ?? parseQuery(msg.q);
   const qNorm = includeTerms.length === 1 ? includeTerms[0] : "";
   const queryTokens = qNorm ? uniqNgrams(qNorm, s.dict.n) : [];
   const qKey = `${includeTerms.join(" ")}|-${excludeTerms.join(" ")}`;
