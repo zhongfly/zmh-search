@@ -1,34 +1,6 @@
 import "./styles.css";
 
-type FilterMode = "any" | "only0" | "only1";
-type SortMode = "relevance" | "id_desc" | "id_asc";
-
-type TagInfo = { tagId: number; name: string; count: number; bit: number };
-
-type WorkerReadyMsg = { type: "ready"; count: number; tags: TagInfo[]; generatedAt: string };
-type WorkerProgressMsg = { type: "progress"; stage: string };
-type WorkerResultsMsg = {
-  type: "results";
-  requestId: number;
-  page: number;
-  size: number;
-  total: number;
-  hasMore: boolean;
-  items: Array<{
-    id: number;
-    title: string;
-    cover: string;
-    aliases: string[];
-    authors: string[];
-    tags: Array<{ tagId: number; name: string }>;
-    hidden: boolean;
-    isHideChapter: boolean;
-    needLogin: boolean;
-    isLock: boolean;
-  }>;
-};
-
-type WorkerOutMsg = WorkerReadyMsg | WorkerProgressMsg | WorkerResultsMsg;
+import type { FilterMode, SortMode, TagInfo, WorkerOutMsg, WorkerResultsMsg } from "./shared/workerProtocol";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("找不到 #app");

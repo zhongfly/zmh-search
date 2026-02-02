@@ -1,3 +1,14 @@
+import type {
+  FilterMode,
+  SearchResultItem,
+  TagBrief,
+  TagInfo,
+  WorkerInMsg,
+  WorkerOutMsg,
+  WorkerResultsMsg,
+  WorkerSearchMsg,
+} from "../shared/workerProtocol";
+
 type AssetRef = { path: string; sha256: string; bytes: number };
 
 type Manifest = {
@@ -25,7 +36,7 @@ type Manifest = {
 
 type TagsJson = {
   version: number;
-  tags: Array<{ tagId: number; name: string; count: number; bit: number }>;
+  tags: TagInfo[];
 };
 
 type DictBinV1 = {
@@ -71,68 +82,13 @@ type MetaBin = {
   aliasesPool: Uint8Array;
 };
 
-type FilterMode = "any" | "only0" | "only1";
-type SortMode = "relevance" | "id_desc" | "id_asc";
-
-type InitMessage = { type: "init" };
-type SearchMessage = {
-  type: "search";
-  requestId: number;
-  q: string;
-  tagBits: number[];
-  excludeTagBits: number[];
-  hidden: FilterMode;
-  hideChapter: FilterMode;
-  needLogin: FilterMode;
-  lock: FilterMode;
-  sort: SortMode;
-  page: number;
-  size: number;
-};
-
-type InMessage = InitMessage | SearchMessage;
-
-type ReadyMessage = {
-  type: "ready";
-  count: number;
-  tags: TagsJson["tags"];
-  generatedAt: string;
-};
-
-type ProgressMessage = { type: "progress"; stage: string };
-
-type ResultItem = {
-  id: number;
-  title: string;
-  cover: string;
-  aliases: string[];
-  authors: string[];
-  tags: Array<{ tagId: number; name: string }>;
-  hidden: boolean;
-  isHideChapter: boolean;
-  needLogin: boolean;
-  isLock: boolean;
-};
-
-type ResultsMessage = {
-  type: "results";
-  requestId: number;
-  page: number;
-  size: number;
-  total: number;
-  hasMore: boolean;
-  items: ResultItem[];
-};
-
-type OutMessage = ReadyMessage | ProgressMessage | ResultsMessage;
-
 const DB_NAME = "zmh-search-cache";
 const DB_VERSION = 1;
 const STORE_FILES = "files";
 
 type StoredFile = { key: string; data: ArrayBuffer };
 
-function post(msg: OutMessage): void {
+function post(msg: WorkerOutMsg): void {
   // eslint-disable-next-line no-restricted-globals
   postMessage(msg);
 }
@@ -495,8 +451,8 @@ type LoadedState = {
   metaTagLo: Uint32Array;
   metaTagHi: Uint32Array;
   metaFlags: Uint8Array;
-  tags: TagsJson["tags"];
-  tagByBit: Array<{ tagId: number; name: string }>;
+  tags: TagInfo[];
+  tagByBit: TagBrief[];
   dict: DictBin;
   indexPlan: IndexPlan;
   indexCache: Map<number, Uint8Array>;
@@ -672,12 +628,13 @@ function maskFromBits(bits: number[]): { lo: number; hi: number } {
   return { lo, hi };
 }
 
-function tagsFromMask(tagByBit: LoadedState["tagByBit"], lo: number, hi: number) {
-  const out: Array<{ tagId: number; name: string }> = [];
+function tagsFromMask(tagByBit: LoadedState["tagByBit"], lo: number, hi: number): TagBrief[] {
+  const out: TagBrief[] = [];
   for (let bit = 0; bit < tagByBit.length; bit += 1) {
     const on = bit < 32 ? ((lo >>> bit) & 1) === 1 : ((hi >>> (bit - 32)) & 1) === 1;
     if (!on) continue;
-    out.push(tagByBit[bit]);
+    const tag = tagByBit[bit];
+    if (tag) out.push(tag);
   }
   return out;
 }
@@ -708,7 +665,7 @@ function metaLocalDocId(s: LoadedState, docId: number, shardId: number): number 
   return docId - shardId * s.metaShardDocs;
 }
 
-function buildItem(s: LoadedState, docId: number): ResultItem {
+function buildItem(s: LoadedState, docId: number): SearchResultItem {
   const f = s.metaFlags[docId] ?? 0;
   const hidden = (f & 1) !== 0;
   const isHideChapter = (f & 2) !== 0;
@@ -810,9 +767,9 @@ function collectTokenIdxs(dict: DictBin, terms: string[]): number[] {
 
 async function searchAsync(
   s: LoadedState,
-  msg: SearchMessage,
+  msg: WorkerSearchMsg,
   signal?: AbortSignal,
-): Promise<ResultsMessage> {
+): Promise<WorkerResultsMsg> {
   const parsed = parseQuery(msg.q);
   const { include: includeTerms, exclude: excludeTerms } = parsed;
   if (includeTerms.length === 0 && excludeTerms.length === 0) return searchSync(s, msg, parsed);
@@ -830,7 +787,7 @@ async function searchAsync(
   return searchSync(s, msg, parsed);
 }
 
-function searchSync(s: LoadedState, msg: SearchMessage, parsed?: ParsedQuery): ResultsMessage {
+function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery): WorkerResultsMsg {
   const totalCount = s.totalCount;
   const { include: includeTerms, exclude: excludeTerms } = parsed ?? parseQuery(msg.q);
   const qNorm = includeTerms.length === 1 ? includeTerms[0] : "";
@@ -845,7 +802,7 @@ function searchSync(s: LoadedState, msg: SearchMessage, parsed?: ParsedQuery): R
   const page = Math.max(1, msg.page | 0);
   const offset = (page - 1) * size;
 
-  const items: ResultItem[] = [];
+  const items: SearchResultItem[] = [];
 
   const cacheKey = `${msg.sort}|${msg.hidden}|${msg.hideChapter}|${msg.needLogin}|${msg.lock}|${selectedLo},${selectedHi}|${excludedLo},${excludedHi}|${qKey}`;
   const cached = s.cache;
@@ -1356,10 +1313,10 @@ async function init(): Promise<void> {
 }
 
 let searching = false;
-let pendingSearch: SearchMessage | null = null;
+let pendingSearch: WorkerSearchMsg | null = null;
 let activeSearchAbort: AbortController | null = null;
 
-function requestSearch(msg: SearchMessage): void {
+function requestSearch(msg: WorkerSearchMsg): void {
   pendingSearch = msg;
   activeSearchAbort?.abort();
   if (!searching) void runSearchLoop();
@@ -1393,7 +1350,7 @@ async function runSearchLoop(): Promise<void> {
 }
 
 // eslint-disable-next-line no-restricted-globals
-self.onmessage = (ev: MessageEvent<InMessage>) => {
+self.onmessage = (ev: MessageEvent<WorkerInMsg>) => {
   const msg = ev.data;
   if (msg.type === "init") {
     void init().catch((err) => {
