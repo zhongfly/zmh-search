@@ -284,6 +284,13 @@ let currentTotalMatches = 0;
 let loadingMore = false;
 let isInitializing = true;
 
+type PerfMs = number | null;
+let initStartMs = 0;
+let initMs: PerfMs = null;
+let activeSearchRequestId: number | null = null;
+let activeSearchStartMs: number | null = null;
+let lastSearchMs: PerfMs = null;
+
 const autoLoadSupported = "IntersectionObserver" in window;
 
 function loadBits(key: string): number[] {
@@ -699,20 +706,25 @@ function shouldSkipSearch(params: ReturnType<typeof getParams>): boolean {
 const worker = new Worker(new URL("./worker/searchWorker.ts", import.meta.url), { type: "module" });
 
 function setStatusReady(): void {
+  const perf: string[] = [];
+  if (initMs !== null) perf.push(`init ${Math.round(initMs)}ms`);
+  if (lastSearchMs !== null) perf.push(`search ${Math.round(lastSearchMs)}ms`);
+  const perfText = perf.length > 0 ? `，${perf.join("，")}` : "";
+
   if (!generatedAt) {
-    statusEl.textContent = `数据（共 ${totalCount} 条）`;
+    statusEl.textContent = `数据（共 ${totalCount} 条${perfText}）`;
     return;
   }
   try {
     const dt = new Date(generatedAt);
     if (!Number.isNaN(dt.getTime())) {
-      statusEl.textContent = `数据：${dt.toLocaleString()}（共 ${totalCount} 条）`;
+      statusEl.textContent = `数据：${dt.toLocaleString()}（共 ${totalCount} 条${perfText}）`;
       return;
     }
   } catch {
     // ignore
   }
-  statusEl.textContent = `数据：${generatedAt}（共 ${totalCount} 条）`;
+  statusEl.textContent = `数据：${generatedAt}（共 ${totalCount} 条${perfText}）`;
 }
 
 worker.onmessage = (ev: MessageEvent<WorkerOutMsg>) => {
@@ -723,6 +735,7 @@ worker.onmessage = (ev: MessageEvent<WorkerOutMsg>) => {
     return;
   }
   if (msg.type === "ready") {
+    initMs = initStartMs > 0 ? performance.now() - initStartMs : null;
     tags = msg.tags;
     totalCount = msg.count;
     generatedAt = msg.generatedAt;
@@ -750,6 +763,9 @@ worker.onmessage = (ev: MessageEvent<WorkerOutMsg>) => {
   }
   if (msg.type === "results") {
     if (msg.requestId !== currentRequestId) return;
+    if (activeSearchRequestId === msg.requestId && activeSearchStartMs !== null) {
+      lastSearchMs = performance.now() - activeSearchStartMs;
+    }
     loadingMore = false;
     currentHasMore = msg.hasMore;
     currentTotalMatches = msg.total;
@@ -761,6 +777,7 @@ worker.onmessage = (ev: MessageEvent<WorkerOutMsg>) => {
   }
 };
 
+initStartMs = performance.now();
 worker.postMessage({ type: "init" });
 
 let debounceTimer: number | null = null;
@@ -789,6 +806,8 @@ function doSearch(page: number): void {
   }
   currentRequestId += 1;
   currentPage = page;
+  activeSearchRequestId = currentRequestId;
+  activeSearchStartMs = performance.now();
   statusEl.textContent = "搜索中…";
   const isLoadMore = page > 1;
   if (isLoadMore) {
