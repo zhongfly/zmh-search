@@ -11,7 +11,7 @@ app.innerHTML = `
       <div>
         <h1 class="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">再漫画搜索</h1>
         <p class="mt-2 text-xs text-slate-600 dark:text-slate-300">
-          本网站与再漫画无关，从互联网上收集信息，仅用于学习研究
+          本网站与再漫画官方无关，仅用于学习研究，漫画信息仅供参考，可能与实际不符
         </p>
       </div>
       <div class="text-xs text-slate-500 dark:text-slate-400" aria-live="polite" data-role="status">
