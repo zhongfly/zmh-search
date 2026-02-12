@@ -30,17 +30,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
 
       - name: 获取数据源 Release 信息
@@ -77,7 +77,7 @@ jobs:
 
       - name: 恢复上次数据版本（manifest.json）
         id: cache-prev
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .cache/zmh-index-prev
           key: zmh-index-manifest-${{ github.ref_name }}-${{ steps.data.outputs.generated_at }}-${{ github.run_id }}
@@ -140,7 +140,7 @@ jobs:
 
       - name: 保存数据版本缓存
         if: steps.decide.outputs.need_build == 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: .cache/zmh-index
           key: zmh-index-manifest-${{ github.ref_name }}-${{ steps.data.outputs.generated_at }}-${{ github.run_id }}
