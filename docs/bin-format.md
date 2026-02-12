@@ -52,7 +52,7 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 
 ---
 
-## `meta-lite*.bin`（MetaBin v3）
+## `meta-lite*.bin`（MetaBin v4）
 
 ### 文件名与分片
 
@@ -69,7 +69,7 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 | 字段 | 类型 | 说明 |
 |---|---:|---|
 | magic | `4 bytes` | 固定 `ZMHm` |
-| version | `uint16` | 固定 `3` |
+| version | `uint16` | 固定 `4` |
 | sepCode | `uint16` | 列表分隔符（默认 `\u001F`） |
 | count | `uint32` | 本分片文档数 |
 | coverBaseCount | `uint32` | cover base 去重后的条目数 |
@@ -78,7 +78,7 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 
 按顺序：
 
-1) `ids: int32[count]`：漫画真实 `id`
+1) `idsDeltaVarint`: 漫画真实 `id` 的 delta-varint 序列（`prev` 初值为 `0`，写完后 `align4`）
 2) `tagLo: uint32[count]`：标签 bitset 低 32 位
 3) `tagHi: uint32[count]`：标签 bitset 高 32 位（当前实现最多 64 位）
 4) `flags: uint8[count]`：状态位（之后 `align4`）
@@ -130,7 +130,7 @@ export type MetaBin = {
   aliasesPool: Uint8Array;
 };
 
-function parseMetaBinV3(buf: ArrayBuffer): MetaBin {
+function parseMetaBinV4(buf: ArrayBuffer): MetaBin {
   const u8 = new Uint8Array(buf);
   if (u8.length < 16) throw new Error("meta 文件过小");
   // "ZMHm"
@@ -140,15 +140,30 @@ function parseMetaBinV3(buf: ArrayBuffer): MetaBin {
 
   const view = new DataView(buf);
   const version = view.getUint16(4, true);
-  if (version !== 3) throw new Error(`meta version 不支持：${version}`);
+  if (version !== 4) throw new Error(`meta version 不支持：${version}`);
 
   const sepCode = view.getUint16(6, true);
   const count = view.getUint32(8, true);
   const coverBaseCount = view.getUint32(12, true);
 
   let off = 16;
-  const ids = new Int32Array(buf, off, count);
-  off += count * 4;
+  const ids = new Int32Array(count);
+  let prevId = 0;
+  for (let i = 0; i < count; i += 1) {
+    // 读取一个 varint（unsigned LEB128）
+    let shift = 0;
+    let value = 0;
+    while (true) {
+      const b = u8[off] ?? 0;
+      off += 1;
+      value |= (b & 0x7f) << shift;
+      if ((b & 0x80) === 0) break;
+      shift += 7;
+    }
+    prevId += value;
+    ids[i] = prevId;
+  }
+  off = align4(off);
   const tagLo = new Uint32Array(buf, off, count);
   off += count * 4;
   const tagHi = new Uint32Array(buf, off, count);

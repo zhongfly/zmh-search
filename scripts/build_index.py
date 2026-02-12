@@ -181,13 +181,18 @@ def _pack_meta_bin(
     idx_bytes = 1 if base_count <= 0xFF else 2
 
     out = bytearray()
-    # meta v3：header 的最后一个 uint32 复用为 coverBaseCount
-    out.extend(struct.pack("<4sHHII", b"ZMHm", 3, ord(sep), count, base_count))
+    # meta v4：header 的最后一个 uint32 复用为 coverBaseCount
+    out.extend(struct.pack("<4sHHII", b"ZMHm", 4, ord(sep), count, base_count))
 
-    ids_arr = array("i", ids)
-    if ids_arr.itemsize != 4:
-        raise RuntimeError("array('i') itemsize != 4")
-    out.extend(ids_arr.tobytes())
+    # ids 使用 delta + varint（prev 初值 0）
+    prev_id = 0
+    for comic_id in ids:
+        delta = comic_id - prev_id
+        if delta <= 0:
+            raise RuntimeError("meta ids 必须严格递增")
+        out.extend(_encode_varint(delta))
+        prev_id = comic_id
+    _pad4(out)
 
     lo_arr = array("I", tag_lo)
     hi_arr = array("I", tag_hi)
@@ -586,7 +591,7 @@ def _build(
         )
 
     stats = {
-        "version": 4,
+        "version": 5,
         "count": len(ids),
         "authorDictCount": len(author_name_by_id),
         "uniqueTokens": len(entries_v3),

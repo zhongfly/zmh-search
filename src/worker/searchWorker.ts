@@ -337,15 +337,32 @@ function parseMetaBin(buf: ArrayBuffer): MetaBin {
 
   const view = new DataView(buf);
   const version = view.getUint16(4, true);
-  if (version !== 3) throw new Error(`meta version 不支持：${version}`);
+  if (version !== 4) throw new Error(`meta version 不支持：${version}`);
 
   const sepCode = view.getUint16(6, true);
   const count = view.getUint32(8, true);
   const coverBaseCount = view.getUint32(12, true);
 
   let off = 16;
-  const ids = new Int32Array(buf, off, count);
-  off += count * 4;
+  const ids = new Int32Array(count);
+  let prevId = 0;
+  for (let i = 0; i < count; i += 1) {
+    let shift = 0;
+    let value = 0;
+    while (true) {
+      if (off >= u8.length) throw new Error("meta ids 编码损坏");
+      const b = u8[off] ?? 0;
+      off += 1;
+      value |= (b & 0x7f) << shift;
+      if ((b & 0x80) === 0) break;
+      shift += 7;
+      if (shift > 28) throw new Error("meta ids varint 过长");
+    }
+    prevId += value;
+    ids[i] = prevId;
+  }
+  off = align4(off);
+
   const tagLo = new Uint32Array(buf, off, count);
   off += count * 4;
   const tagHi = new Uint32Array(buf, off, count);
