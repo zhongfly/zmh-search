@@ -425,6 +425,6 @@ function tokenKey(token: string): number | null {
 
 ## 压缩与缓存（部署/运行时注意点）
 
-- 生产构建会把 `dist/assets/*.bin` 写成 **gzip 压缩后的内容**；需要静态托管层为这些 `.bin` 配置 `Content-Encoding: gzip`（项目已提供 `public/_headers`）。
-- Worker 侧支持“文件内容是 gzip”的情况：检测 gzip header 后，若环境支持 `DecompressionStream` 则会自行解压，否则会抛错提示你需要正确配置 `Content-Encoding`。
+- 生产构建会把 `dist/assets/*.bin` 写成 **brotli 压缩后的内容**；需要静态托管层为这些 `.bin` 配置 `Content-Encoding: br`（项目已提供 `public/_headers`）。
+- Worker 侧仍兼容“文件内容是 gzip”的旧产物：检测 gzip header 后，若环境支持 `DecompressionStream` 则会自行解压，否则会抛错提示你需要正确配置 `Content-Encoding`。
 - `manifest.json` 的 `sha256` 用于 IndexedDB 缓存 key 与淘汰旧缓存；但不会对下载内容做额外校验。

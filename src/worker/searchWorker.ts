@@ -192,7 +192,7 @@ async function maybeGunzipArrayBuffer(buf: ArrayBuffer): Promise<ArrayBuffer> {
   const u8 = new Uint8Array(buf);
   if (!isGzipBytes(u8)) return buf;
   if (typeof DecompressionStream === "undefined") {
-    throw new Error("索引文件为 gzip 格式，但当前环境不支持自动解压。请使用 Cloudflare Pages 或为 /assets/*.bin 配置 Content-Encoding: gzip。");
+    throw new Error("索引文件为压缩格式，但当前环境不支持自动解压。请使用 Cloudflare Pages 或为 /assets/*.bin 配置正确的 Content-Encoding（推荐 br）。");
   }
   const ds = new DecompressionStream("gzip");
   const stream = new Blob([u8]).stream().pipeThrough(ds);

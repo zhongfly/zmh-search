@@ -2,7 +2,7 @@
   Cache-Control: no-store
 
 /assets/*.bin
-  Content-Encoding: gzip
+  Content-Encoding: br
   Cache-Control: public, max-age=31536000, immutable
 
 /assets/*.json

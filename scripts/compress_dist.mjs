@@ -1,6 +1,6 @@
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { gzipSync } from "node:zlib";
+import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 
 const DIST_DIR = path.resolve("dist");
 const ASSETS_DIR = path.join(DIST_DIR, "assets");
@@ -26,24 +26,23 @@ async function main() {
     const raw = await readFile(filePath);
     beforeBytes += raw.byteLength;
 
-    const gz = gzipSync(raw, { level: 9 });
-    if (gz.byteLength >= raw.byteLength) {
-      afterBytes += raw.byteLength;
-      continue;
-    }
+    const br = brotliCompressSync(raw, {
+      params: {
+        [zlibConstants.BROTLI_PARAM_QUALITY]: 11,
+      },
+    });
 
-    await writeFile(filePath, gz);
-    saved += raw.byteLength - gz.byteLength;
-    afterBytes += gz.byteLength;
+    await writeFile(filePath, br);
+    if (br.byteLength < raw.byteLength) {
+      saved += raw.byteLength - br.byteLength;
+    }
+    afterBytes += br.byteLength;
   }
 
   if (saved > 0) {
     // eslint-disable-next-line no-console
-    console.log(
-      `[compress] .bin gzip: ${beforeBytes} -> ${afterBytes} bytes (saved ${saved})`,
-    );
+    console.log(`[compress] .bin brotli: ${beforeBytes} -> ${afterBytes} bytes (saved ${saved})`);
   }
 }
 
 await main();
-
