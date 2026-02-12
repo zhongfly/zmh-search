@@ -76,7 +76,7 @@ type MetaBin = {
   sep: string;
   ids: Int32Array;
   tagLo: Uint32Array;
-  tagHi: Uint32Array;
+  tagHi: Uint16Array;
   flags: Uint8Array;
   titlesOffsets: Uint32Array;
   titlesPool: Uint8Array;
@@ -365,8 +365,8 @@ function parseMetaBin(buf: ArrayBuffer): MetaBin {
 
   const tagLo = new Uint32Array(buf, off, count);
   off += count * 4;
-  const tagHi = new Uint32Array(buf, off, count);
-  off += count * 4;
+  const tagHi = new Uint16Array(buf, off, count);
+  off += count * 2;
   const flags = new Uint8Array(buf, off, count);
   off += count;
   off = align4(off);
@@ -510,7 +510,7 @@ type LoadedState = {
   metaShards: MetaBin[];
   metaIds: Int32Array;
   metaTagLo: Uint32Array;
-  metaTagHi: Uint32Array;
+  metaTagHi: Uint16Array;
   metaFlags: Uint8Array;
   tags: TagInfo[];
   tagByBit: TagBrief[];
@@ -631,8 +631,10 @@ function passesFilters(
   docId: number,
   selectedLo: number,
   selectedHi: number,
+  selectedEx: number,
   excludedLo: number,
   excludedHi: number,
+  excludedEx: number,
   hidden: FilterMode,
   hideChapter: FilterMode,
   needLogin: FilterMode,
@@ -646,6 +648,10 @@ function passesFilters(
   if (excludedHi !== 0 && ((s.metaTagHi[docId] ?? 0) & excludedHi) !== 0) return false;
 
   const f = s.metaFlags[docId] ?? 0;
+  const docTagEx = (f >>> 4) & 0b11;
+  if (selectedEx !== 0 && (docTagEx & selectedEx) !== selectedEx) return false;
+  if (excludedEx !== 0 && (docTagEx & excludedEx) !== 0) return false;
+
   if (hidden !== "any") {
     const isHidden = (f & 1) !== 0;
     if (hidden === "only0" && isHidden) return false;
@@ -675,21 +681,30 @@ function splitList(text: string, sep: string): string[] {
   return text.split(sep).filter(Boolean);
 }
 
-function maskFromBits(bits: number[]): { lo: number; hi: number } {
+function maskFromBits(bits: number[]): { lo: number; hi: number; ex: number } {
   let lo = 0;
   let hi = 0;
+  let ex = 0;
   for (const bit of bits) {
     if (bit < 0) continue;
     if (bit < 32) lo |= 1 << bit;
-    else if (bit < 64) hi |= 1 << (bit - 32);
+    else if (bit < 48) hi |= 1 << (bit - 32);
+    else if (bit < 50) ex |= 1 << (bit - 48);
   }
-  return { lo, hi };
+  return { lo, hi, ex };
 }
 
-function tagsFromMask(tagByBit: LoadedState["tagByBit"], lo: number, hi: number): TagBrief[] {
+function tagsFromMask(tagByBit: LoadedState["tagByBit"], lo: number, hi: number, ex: number): TagBrief[] {
   const out: TagBrief[] = [];
   for (let bit = 0; bit < tagByBit.length; bit += 1) {
-    const on = bit < 32 ? ((lo >>> bit) & 1) === 1 : ((hi >>> (bit - 32)) & 1) === 1;
+    const on =
+      bit < 32
+        ? ((lo >>> bit) & 1) === 1
+        : bit < 48
+          ? ((hi >>> (bit - 32)) & 1) === 1
+          : bit < 50
+            ? ((ex >>> (bit - 48)) & 1) === 1
+            : false;
     if (!on) continue;
     const tag = tagByBit[bit];
     if (tag) out.push(tag);
@@ -765,6 +780,7 @@ function buildItem(s: LoadedState, docId: number): SearchResultItem {
 
   const aliasesText = decodeString(shard.aliasesPool, shard.aliasesOffsets, localDocId);
   const authors = decodeAuthorNames(shard, localDocId, s.authorNameById);
+  const tagEx = (f >>> 4) & 0b11;
 
   return {
     id: s.metaIds[docId] ?? 0,
@@ -772,7 +788,7 @@ function buildItem(s: LoadedState, docId: number): SearchResultItem {
     cover,
     aliases: splitList(aliasesText, s.metaSep),
     authors,
-    tags: tagsFromMask(s.tagByBit, s.metaTagLo[docId] ?? 0, s.metaTagHi[docId] ?? 0),
+    tags: tagsFromMask(s.tagByBit, s.metaTagLo[docId] ?? 0, s.metaTagHi[docId] ?? 0, tagEx),
     hidden,
     isHideChapter,
     needLogin,
@@ -873,8 +889,8 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
   const queryTokens = qNorm ? uniqNgrams(qNorm, s.dict.n) : [];
   const qKey = `${includeTerms.join(" ")}|-${excludeTerms.join(" ")}`;
 
-  const { lo: selectedLo, hi: selectedHi } = maskFromBits(msg.tagBits);
-  const { lo: excludedLo, hi: excludedHi } = maskFromBits(msg.excludeTagBits);
+  const { lo: selectedLo, hi: selectedHi, ex: selectedEx } = maskFromBits(msg.tagBits);
+  const { lo: excludedLo, hi: excludedHi, ex: excludedEx } = maskFromBits(msg.excludeTagBits);
   const hasQuery = includeTerms.length > 0 || excludeTerms.length > 0;
 
   const size = Math.max(1, Math.min(100, msg.size | 0));
@@ -883,7 +899,7 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
 
   const items: SearchResultItem[] = [];
 
-  const cacheKey = `${msg.sort}|${msg.hidden}|${msg.hideChapter}|${msg.needLogin}|${msg.lock}|${selectedLo},${selectedHi}|${excludedLo},${excludedHi}|${qKey}`;
+  const cacheKey = `${msg.sort}|${msg.hidden}|${msg.hideChapter}|${msg.needLogin}|${msg.lock}|${selectedLo},${selectedHi},${selectedEx}|${excludedLo},${excludedHi},${excludedEx}|${qKey}`;
   const cached = s.cache;
   if (cached?.key === cacheKey) {
     const total = cached.docIds.length;
@@ -899,8 +915,10 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
     if (
       selectedLo === 0 &&
       selectedHi === 0 &&
+      selectedEx === 0 &&
       excludedLo === 0 &&
       excludedHi === 0 &&
+      excludedEx === 0 &&
       msg.hidden === "any" &&
       msg.hideChapter === "any" &&
       msg.needLogin === "any" &&
@@ -927,8 +945,10 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
             docId,
             selectedLo,
             selectedHi,
+            selectedEx,
             excludedLo,
             excludedHi,
+            excludedEx,
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
@@ -947,8 +967,10 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
             docId,
             selectedLo,
             selectedHi,
+            selectedEx,
             excludedLo,
             excludedHi,
+            excludedEx,
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
@@ -981,8 +1003,10 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
             docId,
             selectedLo,
             selectedHi,
+            selectedEx,
             excludedLo,
             excludedHi,
+            excludedEx,
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
@@ -1002,8 +1026,10 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
             docId,
             selectedLo,
             selectedHi,
+            selectedEx,
             excludedLo,
             excludedHi,
+            excludedEx,
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
@@ -1060,8 +1086,10 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
               docId,
               selectedLo,
               selectedHi,
+              selectedEx,
               excludedLo,
               excludedHi,
+              excludedEx,
               msg.hidden,
               msg.hideChapter,
               msg.needLogin,
@@ -1183,8 +1211,10 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
           docId,
           selectedLo,
           selectedHi,
+          selectedEx,
           excludedLo,
           excludedHi,
+          excludedEx,
           msg.hidden,
           msg.hideChapter,
           msg.needLogin,
@@ -1338,7 +1368,7 @@ async function init(): Promise<void> {
 
   const metaIds = new Int32Array(totalCount);
   const metaTagLo = new Uint32Array(totalCount);
-  const metaTagHi = new Uint32Array(totalCount);
+  const metaTagHi = new Uint16Array(totalCount);
   const metaFlags = new Uint8Array(totalCount);
 
   const metaShards: MetaBin[] = [];

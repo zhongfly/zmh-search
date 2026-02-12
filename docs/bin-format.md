@@ -80,7 +80,7 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 
 1) `idsDeltaVarint`: 漫画真实 `id` 的 delta-varint 序列（`prev` 初值为 `0`，写完后 `align4`）
 2) `tagLo: uint32[count]`：标签 bitset 低 32 位
-3) `tagHi: uint32[count]`：标签 bitset 高 32 位（当前实现最多 64 位）
+3) `tagHi: uint16[count]`：标签 bitset 高 16 位（对应全局 bit 32..47）
 4) `flags: uint8[count]`：状态位（之后 `align4`）
 5) `titlesPool(count)`：标题字符串池（之后 `align4`）
 6) `coverBasePool(coverBaseCount)`：cover base 字符串池（之后 `align4`）
@@ -99,6 +99,7 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 | 1 | `isHideChapter` |
 | 2 | `needLogin`（或不可读） |
 | 3 | `isLock` |
+| 4-5 | 高位标签扩展位（对应全局 bit 48..49） |
 
 ### coverBaseIds 的编码
 
@@ -115,7 +116,7 @@ export type MetaBin = {
   sep: string;
   ids: Int32Array;
   tagLo: Uint32Array;
-  tagHi: Uint32Array;
+  tagHi: Uint16Array;
   flags: Uint8Array;
   titlesOffsets: Uint32Array;
   titlesPool: Uint8Array;
@@ -166,8 +167,8 @@ function parseMetaBinV4(buf: ArrayBuffer): MetaBin {
   off = align4(off);
   const tagLo = new Uint32Array(buf, off, count);
   off += count * 4;
-  const tagHi = new Uint32Array(buf, off, count);
-  off += count * 4;
+  const tagHi = new Uint16Array(buf, off, count);
+  off += count * 2;
   const flags = new Uint8Array(buf, off, count);
   off += count;
   off = align4(off);

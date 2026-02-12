@@ -195,9 +195,11 @@ def _pack_meta_bin(
     _pad4(out)
 
     lo_arr = array("I", tag_lo)
-    hi_arr = array("I", tag_hi)
-    if lo_arr.itemsize != 4 or hi_arr.itemsize != 4:
+    hi_arr = array("H", tag_hi)
+    if lo_arr.itemsize != 4:
         raise RuntimeError("array('I') itemsize != 4")
+    if hi_arr.itemsize != 2:
+        raise RuntimeError("array('H') itemsize != 2")
     out.extend(lo_arr.tobytes())
     out.extend(hi_arr.tobytes())
 
@@ -364,8 +366,8 @@ def _collect_tags(conn: sqlite3.Connection) -> List[TagInfo]:
             tag_count_by_id[tag_id] = tag_count_by_id.get(tag_id, 0) + 1
 
     tag_ids = sorted(tag_count_by_id.keys())
-    if len(tag_ids) > 64:
-        raise RuntimeError(f"tag 种类过多（{len(tag_ids)}），当前实现仅支持 <= 64")
+    if len(tag_ids) > 50:
+        raise RuntimeError(f"tag 种类过多（{len(tag_ids)}），当前实现仅支持 <= 50")
 
     infos: List[TagInfo] = []
     for bit, tag_id in enumerate(tag_ids):
@@ -444,6 +446,7 @@ def _build(
 
         mask_lo = 0
         mask_hi = 0
+        mask_ex = 0
         for t in tag_items:
             tag_id = t.get("tag_id")
             if not isinstance(tag_id, int):
@@ -453,8 +456,12 @@ def _build(
                 continue
             if bit < 32:
                 mask_lo |= 1 << bit
-            else:
+            elif bit < 48:
                 mask_hi |= 1 << (bit - 32)
+            elif bit < 50:
+                mask_ex |= 1 << (bit - 48)
+            else:
+                raise RuntimeError(f"tag bit 超出可编码范围：{bit}")
 
         raw_hidden = obj.get("hidden")
         try:
@@ -501,6 +508,7 @@ def _build(
             | ((hide_chapter & 1) << 1)
             | ((need_login & 1) << 2)
             | ((is_lock & 1) << 3)
+            | ((mask_ex & 0b11) << 4)
         )
 
         ids.append(comic_id)
