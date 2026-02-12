@@ -29,11 +29,11 @@ npm install
 npm run build:index
 ```
 
-该命令默认会清理 `public/assets/` 里旧的索引产物（仅 `meta-lite.*` / `ngram.*` / `tags.*`）。
+该命令默认会清理 `public/assets/` 里旧的索引产物（仅 `meta-lite.*` / `ngram.*` / `authors.dict.*` / `tags.*`）。
 默认会：
 - 将 `meta-lite` 按固定条目数分片（写入 `manifest.json` 的 `assets.metaShards`），用于“高频小增量更新”时避免全量下载。
 - 将 `ngram.index` 按 tokenKey 哈希固定分片（写入 `manifest.json` 的 `assets.indexShards`），前端会按需下载并在网络条件允许时后台预热。
-- `meta-lite` 使用 v2 格式：将 `cover` 拆为「base + path」，对常见域名做去重以减少体积。
+- `meta-lite` 使用 v3 格式：将 `cover` 拆为「base + path」，并将作者改为 `authorId` 列表（作者名放在独立 `authors.dict`）以减少体积。
 
 如需关闭/调整分片，可传参：
 ```bash

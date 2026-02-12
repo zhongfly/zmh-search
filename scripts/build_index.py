@@ -37,7 +37,7 @@ def _write_hashed(out_dir: Path, stem: str, ext: str, data: bytes) -> Tuple[str,
 
 def _clean_generated(out_dir: Path, keep: List[str]) -> None:
     keep_set = set(keep)
-    prefixes = ("meta-lite.", "ngram.dict.", "ngram.index.", "tags.")
+    prefixes = ("meta-lite.", "ngram.dict.", "ngram.index.", "authors.dict.", "tags.")
 
     for p in out_dir.iterdir():
         if not p.is_file():
@@ -82,6 +82,20 @@ def _build_string_pool(strings: List[str]) -> Tuple[array, bytes]:
     for s in strings:
         b = (s or "").encode("utf-8")
         pool.extend(b)
+        offsets.append(len(pool))
+    return offsets, bytes(pool)
+
+
+def _build_u16_list_pool(rows: List[List[int]]) -> Tuple[array, bytes]:
+    offsets = array("I", [0])
+    pool = bytearray()
+    for row in rows:
+        if any((not isinstance(v, int)) or v < 0 or v > 0xFFFF for v in row):
+            raise RuntimeError("authorId 超出 uint16 范围")
+        arr = array("H", row)
+        if arr.itemsize != 2:
+            raise RuntimeError("array('H') itemsize != 2")
+        pool.extend(arr.tobytes())
         offsets.append(len(pool))
     return offsets, bytes(pool)
 
@@ -131,7 +145,7 @@ def _pack_meta_bin(
     ids: List[int],
     titles: List[str],
     covers: List[str],
-    author_texts: List[str],
+    author_id_lists: List[List[int]],
     alias_texts: List[str],
     tag_lo: List[int],
     tag_hi: List[int],
@@ -142,7 +156,7 @@ def _pack_meta_bin(
     if not (
         len(titles) == count
         and len(covers) == count
-        and len(author_texts) == count
+        and len(author_id_lists) == count
         and len(alias_texts) == count
         and len(tag_lo) == count
         and len(tag_hi) == count
@@ -167,8 +181,8 @@ def _pack_meta_bin(
     idx_bytes = 1 if base_count <= 0xFF else 2
 
     out = bytearray()
-    # meta v2：header 的最后一个 uint32 复用为 coverBaseCount
-    out.extend(struct.pack("<4sHHII", b"ZMHm", 2, ord(sep), count, base_count))
+    # meta v3：header 的最后一个 uint32 复用为 coverBaseCount
+    out.extend(struct.pack("<4sHHII", b"ZMHm", 3, ord(sep), count, base_count))
 
     ids_arr = array("i", ids)
     if ids_arr.itemsize != 4:
@@ -221,14 +235,45 @@ def _pack_meta_bin(
     out.extend(cover_pool)
     _pad4(out)
 
-    for strings in (author_texts, alias_texts):
-        offsets, pool = _build_string_pool(strings)
-        if offsets.itemsize != 4:
-            raise RuntimeError("offsets itemsize != 4")
-        out.extend(offsets.tobytes())
-        out.extend(pool)
-        _pad4(out)
+    # authors（per-doc uint16 authorId 列表池）
+    author_offsets, author_pool = _build_u16_list_pool(author_id_lists)
+    if author_offsets.itemsize != 4:
+        raise RuntimeError("offsets itemsize != 4")
+    out.extend(author_offsets.tobytes())
+    out.extend(author_pool)
+    _pad4(out)
 
+    # aliases（UTF-8 字符串池）
+    alias_offsets, alias_pool = _build_string_pool(alias_texts)
+    if alias_offsets.itemsize != 4:
+        raise RuntimeError("offsets itemsize != 4")
+    out.extend(alias_offsets.tobytes())
+    out.extend(alias_pool)
+    _pad4(out)
+
+    return bytes(out)
+
+
+def _pack_authors_dict_bin(author_name_by_id: Dict[int, str]) -> bytes:
+    author_ids = sorted(author_name_by_id.keys())
+    if any((not isinstance(i, int)) or i < 0 or i > 0xFFFF for i in author_ids):
+        raise RuntimeError("authorId 超出 uint16 范围")
+
+    names = [author_name_by_id.get(i, "") for i in author_ids]
+    offsets, pool = _build_string_pool(names)
+    if offsets.itemsize != 4:
+        raise RuntimeError("offsets itemsize != 4")
+
+    out = bytearray()
+    out.extend(struct.pack("<4sHHII", b"ZMHa", 1, 0, len(author_ids), 0))
+    if author_ids:
+        ids_arr = array("H", author_ids)
+        if ids_arr.itemsize != 2:
+            raise RuntimeError("array('H') itemsize != 2")
+        out.extend(ids_arr.tobytes())
+    _pad4(out)
+    out.extend(offsets.tobytes())
+    out.extend(pool)
     return bytes(out)
 
 
@@ -343,18 +388,19 @@ def _build(
     conn: sqlite3.Connection,
     index_shard_count: int,
     meta_shard_docs: int,
-) -> Tuple[List[bytes], List[bytes], bytes, dict, dict]:
+) -> Tuple[List[bytes], List[bytes], bytes, bytes, dict, dict]:
     tags = _collect_tags(conn)
     tag_bit_by_id = {t.tag_id: t.bit for t in tags}
 
     ids: List[int] = []
     titles: List[str] = []
     covers: List[str] = []
-    author_texts: List[str] = []
+    author_id_lists: List[List[int]] = []
     alias_texts: List[str] = []
     tag_lo: List[int] = []
     tag_hi: List[int] = []
     flags: List[int] = []
+    author_name_by_id: Dict[int, str] = {}
 
     postings: Dict[str, List[int]] = {}
 
@@ -374,11 +420,20 @@ def _build(
             else cover_raw
         )
 
-        authors = [
-            a.get("tag_name")
-            for a in (obj.get("authors") or [])
-            if isinstance(a.get("tag_name"), str) and a.get("tag_name")
-        ]
+        authors: List[str] = []
+        author_ids: List[int] = []
+        for a in (obj.get("authors") or []):
+            aid = a.get("tag_id")
+            name = a.get("tag_name")
+            if not isinstance(aid, int):
+                continue
+            if aid < 0 or aid > 0xFFFF:
+                raise RuntimeError(f"authorId 超出 uint16 范围：{aid}")
+            if not isinstance(name, str) or not name:
+                continue
+            author_ids.append(aid)
+            authors.append(name)
+            author_name_by_id.setdefault(aid, name)
         aliases = [a for a in (obj.get("aliases") or []) if isinstance(a, str) and a]
         tag_items = obj.get("types") or []
 
@@ -446,7 +501,7 @@ def _build(
         ids.append(comic_id)
         titles.append(title)
         covers.append(cover)
-        author_texts.append(LIST_SEP.join(authors))
+        author_id_lists.append(author_ids)
         alias_texts.append(LIST_SEP.join(aliases))
         tag_lo.append(mask_lo)
         tag_hi.append(mask_hi)
@@ -506,6 +561,7 @@ def _build(
         entries_v3.append((key, shard_id, local_off, len(data), len(doc_ids)))
 
     dict_bin = _pack_dict_bin_v3(NGRAM_N, entries_v3)
+    authors_dict_bin = _pack_authors_dict_bin(author_name_by_id)
     index_parts = [bytes(b) for b in shard_out]
 
     meta_docs = int(meta_shard_docs or 0)
@@ -520,7 +576,7 @@ def _build(
                 ids=ids[start:end],
                 titles=titles[start:end],
                 covers=covers[start:end],
-                author_texts=author_texts[start:end],
+                author_id_lists=author_id_lists[start:end],
                 alias_texts=alias_texts[start:end],
                 tag_lo=tag_lo[start:end],
                 tag_hi=tag_hi[start:end],
@@ -530,8 +586,9 @@ def _build(
         )
 
     stats = {
-        "version": 3,
+        "version": 4,
         "count": len(ids),
+        "authorDictCount": len(author_name_by_id),
         "uniqueTokens": len(entries_v3),
         "indexBytes": index_total,
         "indexShardCount": shard_count,
@@ -543,7 +600,7 @@ def _build(
     if skipped > 0:
         print(f"提示：有 {skipped} 个 token 无法编码为 utf-16 2-unit key，已跳过", file=sys.stderr)
 
-    return meta_parts, index_parts, dict_bin, tags_json, stats
+    return meta_parts, index_parts, dict_bin, authors_dict_bin, tags_json, stats
 
 
 def _parse_args(argv: List[str]):
@@ -567,7 +624,7 @@ def _parse_args(argv: List[str]):
     parser.add_argument(
         "--clean",
         action="store_true",
-        help="生成完成后清理 out_dir 中旧的索引产物（仅删除 meta-lite.* / ngram.* / tags.*）。",
+        help="生成完成后清理 out_dir 中旧的索引产物（仅删除 meta-lite.* / ngram.* / authors.dict.* / tags.*）。",
     )
     parser.add_argument(
         "--meta-shard-docs",
@@ -600,7 +657,7 @@ def main() -> int:
 
     conn = sqlite3.connect(db_path.as_posix())
     try:
-        meta_parts, index_parts, dict_bin, tags_json, stats = _build(
+        meta_parts, index_parts, dict_bin, authors_dict_bin, tags_json, stats = _build(
             conn,
             index_shard_count=index_shard_count,
             meta_shard_docs=meta_shard_docs,
@@ -609,6 +666,7 @@ def main() -> int:
         conn.close()
 
     dict_bytes = dict_bin
+    authors_dict_bytes = authors_dict_bin
     tags_bytes = _json_bytes(tags_json)
 
     meta_assets = []
@@ -617,6 +675,9 @@ def main() -> int:
         meta_assets.append({"path": f"assets/{name}", "sha256": sha, "bytes": size})
 
     dict_name, dict_sha, dict_size = _write_hashed(out_dir, "ngram.dict", ".bin", dict_bytes)
+    authors_name, authors_sha, authors_size = _write_hashed(
+        out_dir, "authors.dict", ".bin", authors_dict_bytes
+    )
     tags_name, tags_sha, tags_size = _write_hashed(out_dir, "tags", ".json", tags_bytes)
 
     index_assets = []
@@ -631,6 +692,7 @@ def main() -> int:
         "assets": {
             "metaShards": meta_assets,
             "dict": {"path": f"assets/{dict_name}", "sha256": dict_sha, "bytes": dict_size},
+            "authors": {"path": f"assets/{authors_name}", "sha256": authors_sha, "bytes": authors_size},
             "tags": {"path": f"assets/{tags_name}", "sha256": tags_sha, "bytes": tags_size},
             "indexShards": index_assets,
         },
@@ -647,6 +709,7 @@ def main() -> int:
                 ".gitkeep",
                 "manifest.json",
                 dict_name,
+                authors_name,
                 tags_name,
                 *keep_meta_names,
                 *keep_index_names,
@@ -658,6 +721,7 @@ def main() -> int:
     for a in meta_assets:
         print(f"- {out_dir.as_posix()}/{a['path'].split('/')[-1]}")
     print(f"- {out_dir.as_posix()}/{dict_name}")
+    print(f"- {out_dir.as_posix()}/{authors_name}")
     print(f"- {out_dir.as_posix()}/{tags_name}")
     for a in index_assets:
         print(f"- {out_dir.as_posix()}/{a['path'].split('/')[-1]}")

@@ -5,9 +5,10 @@
 - 生成端：`scripts/build_index.py`
 - 使用端：`src/worker/searchWorker.ts`（WebWorker，负责下载/解压/解析/检索）
 
-索引由三类资源组成：
+索引由四类资源组成：
 
 - `meta-lite*.bin`：文档（漫画）元信息分片（MetaBin）
+- `authors.dict*.bin`：作者字典（authorId -> 作者名）
 - `ngram.dict*.bin`：n-gram 词典（DictBin）
 - `ngram.index*.bin`：倒排 postings 分片（Index shard，纯字节池）
 
@@ -51,7 +52,7 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 
 ---
 
-## `meta-lite*.bin`（MetaBin v2）
+## `meta-lite*.bin`（MetaBin v3）
 
 ### 文件名与分片
 
@@ -68,7 +69,7 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 | 字段 | 类型 | 说明 |
 |---|---:|---|
 | magic | `4 bytes` | 固定 `ZMHm` |
-| version | `uint16` | 固定 `2` |
+| version | `uint16` | 固定 `3` |
 | sepCode | `uint16` | 列表分隔符（默认 `\u001F`） |
 | count | `uint32` | 本分片文档数 |
 | coverBaseCount | `uint32` | cover base 去重后的条目数 |
@@ -85,7 +86,7 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 6) `coverBasePool(coverBaseCount)`：cover base 字符串池（之后 `align4`）
 7) `coverBaseIds: uint8[count]` 或 `uint16[count]`：每条文档指向 cover base 的索引（之后 `align4`）
 8) `coverPathsPool(count)`：cover path 字符串池（之后 `align4`）
-9) `authorsPool(count)`：作者列表字符串池（之后 `align4`）
+9) `authorIds`: `offsets:uint32[count+1] + pool:uint16[]`（作者 ID 列表池；offset 以字节计，之后 `align4`）
 10) `aliasesPool(count)`：别名列表字符串池（之后 `align4`）
 
 其中 `xxxPool(n)` 都是：`offsets:uint32[n+1] + pool:uint8[offsets[n]]`。
@@ -123,13 +124,13 @@ export type MetaBin = {
   coverBaseIds: Uint16Array;
   coverPathsOffsets: Uint32Array;
   coverPathsPool: Uint8Array;
-  authorsOffsets: Uint32Array;
-  authorsPool: Uint8Array;
+  authorIdsOffsets: Uint32Array;
+  authorIdsPool: Uint16Array;
   aliasesOffsets: Uint32Array;
   aliasesPool: Uint8Array;
 };
 
-function parseMetaBinV2(buf: ArrayBuffer): MetaBin {
+function parseMetaBinV3(buf: ArrayBuffer): MetaBin {
   const u8 = new Uint8Array(buf);
   if (u8.length < 16) throw new Error("meta 文件过小");
   // "ZMHm"
@@ -139,7 +140,7 @@ function parseMetaBinV2(buf: ArrayBuffer): MetaBin {
 
   const view = new DataView(buf);
   const version = view.getUint16(4, true);
-  if (version !== 2) throw new Error(`meta version 不支持：${version}`);
+  if (version !== 3) throw new Error(`meta version 不支持：${version}`);
 
   const sepCode = view.getUint16(6, true);
   const count = view.getUint32(8, true);
@@ -185,7 +186,12 @@ function parseMetaBinV2(buf: ArrayBuffer): MetaBin {
   }
 
   const coverPaths = readPool(count);
-  const authors = readPool(count);
+  const authorIdsOffsets = new Uint32Array(buf, off, count + 1);
+  off += (count + 1) * 4;
+  const authorBytes = authorIdsOffsets[count] ?? 0;
+  const authorIdsPool = new Uint16Array(buf, off, authorBytes >>> 1);
+  off += authorBytes;
+  off = align4(off);
   const aliases = readPool(count);
 
   return {
@@ -202,13 +208,33 @@ function parseMetaBinV2(buf: ArrayBuffer): MetaBin {
     coverBaseIds,
     coverPathsOffsets: coverPaths.offsets,
     coverPathsPool: coverPaths.pool,
-    authorsOffsets: authors.offsets,
-    authorsPool: authors.pool,
+    authorIdsOffsets,
+    authorIdsPool,
     aliasesOffsets: aliases.offsets,
     aliasesPool: aliases.pool,
   };
 }
 ```
+
+---
+
+## `authors.dict*.bin`（AuthorsDict v1）
+
+### Header（固定 16 字节）
+
+| 字段 | 类型 | 说明 |
+|---|---:|---|
+| magic | `4 bytes` | 固定 `ZMHa` |
+| version | `uint16` | 固定 `1` |
+| reserved16 | `uint16` | 保留（0） |
+| count | `uint32` | 作者条目数 |
+| reserved32 | `uint32` | 保留（0） |
+
+### Body
+
+- `ids:uint16[count]`（原始 `authorId`）
+- `align4`
+- `namesPool(count)`：作者名字符串池（`offsets:uint32[count+1] + pool:uint8[]`）
 
 ---
 
@@ -377,8 +403,7 @@ function tokenKey(token: string): number | null {
 
 ### index shard
 
-- dict v1：只有一个 index 分片（shardId 恒为 0）
-- dict v2：`shardId = dict.shardIds[tokenIdx]`，用它选择对应的 `ngram.index.hNNN*.bin`
+- dict v2/v3：`shardId = dict.shardIds[tokenIdx]`，用它选择对应的 `ngram.index.hNNN*.bin`
 
 ---
 

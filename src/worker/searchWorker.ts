@@ -28,6 +28,7 @@ type Manifest = {
     meta?: AssetRef;
     metaShards?: AssetRef[];
     dict: AssetRef;
+    authors: AssetRef;
     tags: AssetRef;
     index?: AssetRef;
     indexShards?: AssetRef[];
@@ -61,6 +62,13 @@ type DictBinV3 = {
 
 type DictBin = DictBinV2 | DictBinV3;
 
+type AuthorsDictBin = {
+  count: number;
+  ids: Uint16Array;
+  namesOffsets: Uint32Array;
+  namesPool: Uint8Array;
+};
+
 type IndexPlan = { kind: "single"; asset: AssetRef } | { kind: "sharded"; assets: AssetRef[] };
 
 type MetaBin = {
@@ -77,8 +85,8 @@ type MetaBin = {
   coverBaseIds: Uint16Array;
   coverPathsOffsets: Uint32Array;
   coverPathsPool: Uint8Array;
-  authorsOffsets: Uint32Array;
-  authorsPool: Uint8Array;
+  authorIdsOffsets: Uint32Array;
+  authorIdsPool: Uint16Array;
   aliasesOffsets: Uint32Array;
   aliasesPool: Uint8Array;
 };
@@ -329,7 +337,7 @@ function parseMetaBin(buf: ArrayBuffer): MetaBin {
 
   const view = new DataView(buf);
   const version = view.getUint16(4, true);
-  if (version !== 2) throw new Error(`meta version 不支持：${version}`);
+  if (version !== 3) throw new Error(`meta version 不支持：${version}`);
 
   const sepCode = view.getUint16(6, true);
   const count = view.getUint32(8, true);
@@ -379,8 +387,14 @@ function parseMetaBin(buf: ArrayBuffer): MetaBin {
   const coverPaths = readPool(count);
   off = coverPaths.next;
 
-  const authors = readPool(count);
-  off = authors.next;
+  const authorIdsOffsets = new Uint32Array(buf, off, count + 1);
+  off += (count + 1) * 4;
+  const authorBytes = authorIdsOffsets[count] ?? 0;
+  if ((authorBytes & 1) !== 0) throw new Error("meta authors 字节长度非法");
+  const authorIdsPool = new Uint16Array(buf, off, authorBytes >>> 1);
+  off += authorBytes;
+  off = align4(off);
+
   const aliases = readPool(count);
 
   return {
@@ -397,11 +411,37 @@ function parseMetaBin(buf: ArrayBuffer): MetaBin {
     coverBaseIds,
     coverPathsOffsets: coverPaths.offsets,
     coverPathsPool: coverPaths.pool,
-    authorsOffsets: authors.offsets,
-    authorsPool: authors.pool,
+    authorIdsOffsets,
+    authorIdsPool,
     aliasesOffsets: aliases.offsets,
     aliasesPool: aliases.pool,
   };
+}
+
+function parseAuthorsDictBin(buf: ArrayBuffer): AuthorsDictBin {
+  const u8 = new Uint8Array(buf);
+  if (u8.length < 16) throw new Error("authors.dict 文件过小");
+  // "ZMHa"
+  if (u8[0] !== 90 || u8[1] !== 77 || u8[2] !== 72 || u8[3] !== 97) {
+    throw new Error("authors.dict magic 不匹配");
+  }
+
+  const view = new DataView(buf);
+  const version = view.getUint16(4, true);
+  if (version !== 1) throw new Error(`authors.dict version 不支持：${version}`);
+  const count = view.getUint32(8, true);
+
+  let off = 16;
+  const ids = new Uint16Array(buf, off, count);
+  off += count * 2;
+  off = align4(off);
+
+  const namesOffsets = new Uint32Array(buf, off, count + 1);
+  off += (count + 1) * 4;
+  const namesLen = namesOffsets[count] ?? 0;
+  const namesPool = new Uint8Array(buf, off, namesLen);
+
+  return { count, ids, namesOffsets, namesPool };
 }
 
 function parseDictBin(buf: ArrayBuffer): DictBin {
@@ -457,6 +497,7 @@ type LoadedState = {
   metaFlags: Uint8Array;
   tags: TagInfo[];
   tagByBit: TagBrief[];
+  authorNameById: Map<number, string>;
   dict: DictBin;
   indexPlan: IndexPlan;
   indexCache: Map<number, Uint8Array>;
@@ -484,7 +525,7 @@ function getIndexAsset(plan: IndexPlan, shardId: number): AssetRef {
 }
 
 function dictShardId(dict: DictBin, tokenIdx: number): number {
-  return dict.version === 2 ? dict.shardIds[tokenIdx] ?? 0 : 0;
+  return dict.shardIds[tokenIdx] ?? 0;
 }
 
 function decodeTokenIdxPostings(
@@ -646,6 +687,27 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
   return DECODER.decode(pool.subarray(start, end));
 }
 
+function decodeAuthorNames(
+  shard: MetaBin,
+  localDocId: number,
+  authorNameById: Map<number, string>,
+): string[] {
+  const startBytes = shard.authorIdsOffsets[localDocId] ?? 0;
+  const endBytes = shard.authorIdsOffsets[localDocId + 1] ?? startBytes;
+  if (endBytes <= startBytes) return [];
+  if ((startBytes & 1) !== 0 || (endBytes & 1) !== 0) return [];
+
+  const start = startBytes >>> 1;
+  const end = endBytes >>> 1;
+  const out: string[] = [];
+  for (let i = start; i < end; i += 1) {
+    const id = shard.authorIdsPool[i] ?? 0;
+    const name = authorNameById.get(id);
+    if (name) out.push(name);
+  }
+  return out;
+}
+
 function shardShiftForDocs(shardDocs: number): number | null {
   const n = shardDocs | 0;
   if (n <= 0) return null;
@@ -685,14 +747,14 @@ function buildItem(s: LoadedState, docId: number): SearchResultItem {
   const cover = coverBase.length > 0 ? `${coverBase}${coverPath}` : coverPath;
 
   const aliasesText = decodeString(shard.aliasesPool, shard.aliasesOffsets, localDocId);
-  const authorsText = decodeString(shard.authorsPool, shard.authorsOffsets, localDocId);
+  const authors = decodeAuthorNames(shard, localDocId, s.authorNameById);
 
   return {
     id: s.metaIds[docId] ?? 0,
     title,
     cover,
     aliases: splitList(aliasesText, s.metaSep),
-    authors: splitList(authorsText, s.metaSep),
+    authors,
     tags: tagsFromMask(s.tagByBit, s.metaTagLo[docId] ?? 0, s.metaTagHi[docId] ?? 0),
     hidden,
     isHideChapter,
@@ -1031,7 +1093,7 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
 
         const titleText = decodeString(shard.titlesPool, shard.titlesOffsets, localDocId);
         const aliasesText = decodeString(shard.aliasesPool, shard.aliasesOffsets, localDocId);
-        const authorsText = decodeString(shard.authorsPool, shard.authorsOffsets, localDocId);
+        const authorsText = decodeAuthorNames(shard, localDocId, s.authorNameById).join(s.metaSep);
 
         const titleNorm = normText(titleText);
         const aliasesNorm = normText(aliasesText);
@@ -1163,7 +1225,7 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
     const aliasesText = decodeString(shard.aliasesPool, shard.aliasesOffsets, localDocId);
     if (normText(aliasesText).includes(qNorm)) score += 0.6;
 
-    const authorsText = decodeString(shard.authorsPool, shard.authorsOffsets, localDocId);
+    const authorsText = decodeAuthorNames(shard, localDocId, s.authorNameById).join(s.metaSep);
     if (normText(authorsText).includes(qNorm)) score += 0.4;
 
     s.scores[docId] = score;
@@ -1219,7 +1281,11 @@ async function init(): Promise<void> {
     if (single) return { kind: "single", asset: single };
     throw new Error("manifest 缺少 index/indexShards");
   })();
-  const keepKeys = new Set<string>([manifest.assets.tags.sha256, manifest.assets.dict.sha256]);
+  const keepKeys = new Set<string>([
+    manifest.assets.tags.sha256,
+    manifest.assets.dict.sha256,
+    manifest.assets.authors.sha256,
+  ]);
   for (const a of metaAssets) keepKeys.add(a.sha256);
   if (indexPlan.kind === "single") keepKeys.add(indexPlan.asset.sha256);
   else for (const asset of indexPlan.assets) keepKeys.add(asset.sha256);
@@ -1227,13 +1293,14 @@ async function init(): Promise<void> {
   post({ type: "progress", stage: "打开本地缓存…" });
   const db = await openDb();
 
-  post({ type: "progress", stage: "加载索引文件（tags/dict/meta）…" });
+  post({ type: "progress", stage: "加载索引文件（tags/dict/authors/meta）…" });
   const metaBufsPromise = loadAssetsBatched(db, metaAssets, 6, (done, total) => {
     post({ type: "progress", stage: `加载 meta 分片…（${done}/${total}）` });
   });
-  const [tagsBuf, dictBuf, metaBufs] = await Promise.all([
+  const [tagsBuf, dictBuf, authorsBuf, metaBufs] = await Promise.all([
     loadAsset(db, manifest.assets.tags),
     loadAsset(db, manifest.assets.dict),
+    loadAsset(db, manifest.assets.authors),
     metaBufsPromise,
   ]);
 
@@ -1244,6 +1311,13 @@ async function init(): Promise<void> {
   for (const t of tags) tagByBit[t.bit] = { tagId: t.tagId, name: t.name };
 
   const dict = parseDictBin(dictBuf);
+  const authorsDict = parseAuthorsDictBin(authorsBuf);
+  const authorNameById = new Map<number, string>();
+  for (let i = 0; i < authorsDict.count; i += 1) {
+    const id = authorsDict.ids[i] ?? 0;
+    const name = decodeString(authorsDict.namesPool, authorsDict.namesOffsets, i);
+    if (name) authorNameById.set(id, name);
+  }
 
   const metaIds = new Int32Array(totalCount);
   const metaTagLo = new Uint32Array(totalCount);
@@ -1286,6 +1360,7 @@ async function init(): Promise<void> {
     metaFlags,
     tags,
     tagByBit,
+    authorNameById,
     dict,
     indexPlan,
     indexCache: new Map<number, Uint8Array>(),
