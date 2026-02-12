@@ -212,42 +212,33 @@ function parseMetaBinV2(buf: ArrayBuffer): MetaBin {
 
 ---
 
-## `ngram.dict*.bin`（DictBin v1 / v2）
+## `ngram.dict*.bin`（DictBin v2 / v3）
 
 ### Header（固定 16 字节）
 
 | 字段 | 类型 | 说明 |
 |---|---:|---|
 | magic | `4 bytes` | 固定 `ZMHd` |
-| version | `uint16` | `1` 或 `2` |
+| version | `uint16` | `2` / `3` |
 | n | `uint16` | n-gram 长度（当前为 2） |
 | count | `uint32` | 词条数 |
 | reserved | `uint32` | 保留（当前为 0） |
 
-### Body（全为 `uint32[count]`）
+### Body
 
-- v1：`keys, offsets, lengths, dfs`
 - v2：`keys, shardIds, offsets, lengths, dfs`
+- v3：`keys:uint32[count], shardIds:uint8[count], pad4, offsets:uint32[count], lengths:uint16[count], dfs:uint16[count]`
 
 字段含义：
 
 - `key`：tokenKey（2 个 UTF-16 code unit 拼成 uint32）
-- `shardId`（仅 v2）：该 token 的 postings 存放在哪个 index 分片
+- `shardId`（v2/v3）：该 token 的 postings 存放在哪个 index 分片
 - `offset/length`：postings 在 index 分片字节池中的起始与长度
 - `df`：document frequency（postings 中 docId 数量）
 
 ### TypeScript 解析参考实现
 
 ```ts
-export type DictBinV1 = {
-  version: 1;
-  n: number;
-  keys: Uint32Array;
-  offsets: Uint32Array;
-  lengths: Uint32Array;
-  dfs: Uint32Array;
-};
-
 export type DictBinV2 = {
   version: 2;
   n: number;
@@ -258,7 +249,17 @@ export type DictBinV2 = {
   dfs: Uint32Array;
 };
 
-export type DictBin = DictBinV1 | DictBinV2;
+export type DictBinV3 = {
+  version: 3;
+  n: number;
+  keys: Uint32Array;
+  shardIds: Uint8Array;
+  offsets: Uint32Array;
+  lengths: Uint16Array;
+  dfs: Uint16Array;
+};
+
+export type DictBin = DictBinV2 | DictBinV3;
 
 function parseDictBin(buf: ArrayBuffer): DictBin {
   const u8 = new Uint8Array(buf);
@@ -277,15 +278,6 @@ function parseDictBin(buf: ArrayBuffer): DictBin {
   const keys = new Uint32Array(buf, off, count);
   off += count * 4;
 
-  if (version === 1) {
-    const offsets = new Uint32Array(buf, off, count);
-    off += count * 4;
-    const lengths = new Uint32Array(buf, off, count);
-    off += count * 4;
-    const dfs = new Uint32Array(buf, off, count);
-    return { version: 1, n, keys, offsets, lengths, dfs };
-  }
-
   if (version === 2) {
     const shardIds = new Uint32Array(buf, off, count);
     off += count * 4;
@@ -295,6 +287,18 @@ function parseDictBin(buf: ArrayBuffer): DictBin {
     off += count * 4;
     const dfs = new Uint32Array(buf, off, count);
     return { version: 2, n, keys, shardIds, offsets, lengths, dfs };
+  }
+
+  if (version === 3) {
+    const shardIds = new Uint8Array(buf, off, count);
+    off += count;
+    off = align4(off);
+    const offsets = new Uint32Array(buf, off, count);
+    off += count * 4;
+    const lengths = new Uint16Array(buf, off, count);
+    off += count * 2;
+    const dfs = new Uint16Array(buf, off, count);
+    return { version: 3, n, keys, shardIds, offsets, lengths, dfs };
   }
 
   throw new Error(`dict version 不支持：${version}`);
@@ -383,4 +387,3 @@ function tokenKey(token: string): number | null {
 - 生产构建会把 `dist/assets/*.bin` 写成 **gzip 压缩后的内容**；需要静态托管层为这些 `.bin` 配置 `Content-Encoding: gzip`（项目已提供 `public/_headers`）。
 - Worker 侧支持“文件内容是 gzip”的情况：检测 gzip header 后，若环境支持 `DecompressionStream` 则会自行解压，否则会抛错提示你需要正确配置 `Content-Encoding`。
 - `manifest.json` 的 `sha256` 用于 IndexedDB 缓存 key 与淘汰旧缓存；但不会对下载内容做额外校验。
-

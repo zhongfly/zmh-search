@@ -39,15 +39,6 @@ type TagsJson = {
   tags: TagInfo[];
 };
 
-type DictBinV1 = {
-  version: 1;
-  n: number;
-  keys: Uint32Array;
-  offsets: Uint32Array;
-  lengths: Uint32Array;
-  dfs: Uint32Array;
-};
-
 type DictBinV2 = {
   version: 2;
   n: number;
@@ -58,7 +49,17 @@ type DictBinV2 = {
   dfs: Uint32Array;
 };
 
-type DictBin = DictBinV1 | DictBinV2;
+type DictBinV3 = {
+  version: 3;
+  n: number;
+  keys: Uint32Array;
+  shardIds: Uint8Array;
+  offsets: Uint32Array;
+  lengths: Uint16Array;
+  dfs: Uint16Array;
+};
+
+type DictBin = DictBinV2 | DictBinV3;
 
 type IndexPlan = { kind: "single"; asset: AssetRef } | { kind: "sharded"; assets: AssetRef[] };
 
@@ -418,14 +419,6 @@ function parseDictBin(buf: ArrayBuffer): DictBin {
   let off = 16;
   const keys = new Uint32Array(buf, off, count);
   off += count * 4;
-  if (version === 1) {
-    const offsets = new Uint32Array(buf, off, count);
-    off += count * 4;
-    const lengths = new Uint32Array(buf, off, count);
-    off += count * 4;
-    const dfs = new Uint32Array(buf, off, count);
-    return { version: 1, n, keys, offsets, lengths, dfs };
-  }
   if (version === 2) {
     const shardIds = new Uint32Array(buf, off, count);
     off += count * 4;
@@ -435,6 +428,17 @@ function parseDictBin(buf: ArrayBuffer): DictBin {
     off += count * 4;
     const dfs = new Uint32Array(buf, off, count);
     return { version: 2, n, keys, shardIds, offsets, lengths, dfs };
+  }
+  if (version === 3) {
+    const shardIds = new Uint8Array(buf, off, count);
+    off += count;
+    off = align4(off);
+    const offsets = new Uint32Array(buf, off, count);
+    off += count * 4;
+    const lengths = new Uint16Array(buf, off, count);
+    off += count * 2;
+    const dfs = new Uint16Array(buf, off, count);
+    return { version: 3, n, keys, shardIds, offsets, lengths, dfs };
   }
   throw new Error(`dict version 不支持：${version}`);
 }
@@ -529,16 +533,12 @@ async function ensureIndexForTokenIdxs(
   signal?: AbortSignal,
 ): Promise<void> {
   if (tokenIdxs.length === 0) return;
-  if (s.dict.version === 1 && s.indexPlan.kind === "sharded") {
-    throw new Error("dict v1 与 index 分片不兼容，请重新生成索引。");
-  }
   const shardIds = new Set<number>();
   for (const idx of tokenIdxs) shardIds.add(dictShardId(s.dict, idx));
   await Promise.all([...shardIds].map((id) => loadIndexShard(s, id, signal)));
 }
 
 async function preloadIndex(s: LoadedState): Promise<void> {
-  if (s.dict.version === 1 && s.indexPlan.kind === "sharded") return;
   const total = indexShardCount(s.indexPlan);
   if (total <= 0) return;
 

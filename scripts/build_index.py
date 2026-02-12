@@ -232,24 +232,28 @@ def _pack_meta_bin(
     return bytes(out)
 
 
-def _pack_dict_bin(n: int, entries: List[Tuple[int, int, int, int]]) -> bytes:
+def _pack_dict_bin_v3(n: int, entries: List[Tuple[int, int, int, int, int]]) -> bytes:
     out = bytearray()
-    out.extend(struct.pack("<4sHHII", b"ZMHd", 1, n, len(entries), 0))
-    out.extend(array("I", [k for (k, _, _, _) in entries]).tobytes())
-    out.extend(array("I", [o for (_, o, _, _) in entries]).tobytes())
-    out.extend(array("I", [l for (_, _, l, _) in entries]).tobytes())
-    out.extend(array("I", [df for (_, _, _, df) in entries]).tobytes())
-    return bytes(out)
-
-
-def _pack_dict_bin_v2(n: int, entries: List[Tuple[int, int, int, int, int]]) -> bytes:
-    out = bytearray()
-    out.extend(struct.pack("<4sHHII", b"ZMHd", 2, n, len(entries), 0))
+    out.extend(struct.pack("<4sHHII", b"ZMHd", 3, n, len(entries), 0))
     out.extend(array("I", [k for (k, _, _, _, _) in entries]).tobytes())
-    out.extend(array("I", [s for (_, s, _, _, _) in entries]).tobytes())
+
+    shard_ids = [s for (_, s, _, _, _) in entries]
+    if any(s < 0 or s > 0xFF for s in shard_ids):
+        raise RuntimeError("dict shardId 超出 uint8 范围")
+    out.extend(bytes(shard_ids))
+    _pad4(out)
+
     out.extend(array("I", [o for (_, _, o, _, _) in entries]).tobytes())
-    out.extend(array("I", [l for (_, _, _, l, _) in entries]).tobytes())
-    out.extend(array("I", [df for (_, _, _, _, df) in entries]).tobytes())
+
+    lengths = [l for (_, _, _, l, _) in entries]
+    if any(l < 0 or l > 0xFFFF for l in lengths):
+        raise RuntimeError("dict length 超出 uint16 范围")
+    out.extend(array("H", lengths).tobytes())
+
+    dfs = [df for (_, _, _, _, df) in entries]
+    if any(df < 0 or df > 0xFFFF for df in dfs):
+        raise RuntimeError("dict df 超出 uint16 范围")
+    out.extend(array("H", dfs).tobytes())
     return bytes(out)
 
 
@@ -491,7 +495,7 @@ def _build(
         shard_count = 1
 
     shard_out = [bytearray() for _ in range(shard_count)]
-    entries_v2: List[Tuple[int, int, int, int, int]] = []
+    entries_v3: List[Tuple[int, int, int, int, int]] = []
     index_total = 0
     for key, doc_ids in dict_items:
         data = _encode_postings(doc_ids)
@@ -499,9 +503,9 @@ def _build(
         local_off = len(shard_out[shard_id])
         shard_out[shard_id].extend(data)
         index_total += len(data)
-        entries_v2.append((key, shard_id, local_off, len(data), len(doc_ids)))
+        entries_v3.append((key, shard_id, local_off, len(data), len(doc_ids)))
 
-    dict_bin = _pack_dict_bin_v2(NGRAM_N, entries_v2)
+    dict_bin = _pack_dict_bin_v3(NGRAM_N, entries_v3)
     index_parts = [bytes(b) for b in shard_out]
 
     meta_docs = int(meta_shard_docs or 0)
@@ -528,7 +532,7 @@ def _build(
     stats = {
         "version": 3,
         "count": len(ids),
-        "uniqueTokens": len(entries_v2),
+        "uniqueTokens": len(entries_v3),
         "indexBytes": index_total,
         "indexShardCount": shard_count,
         "indexShardMode": "tokenKeyHash",
