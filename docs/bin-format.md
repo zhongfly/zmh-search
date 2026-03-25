@@ -52,7 +52,7 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 
 ---
 
-## `meta-lite*.bin`（MetaBin v4）
+## `meta-lite*.bin`（MetaBin v5）
 
 ### 文件名与分片
 
@@ -64,14 +64,15 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 
 这些分片按顺序覆盖全量 `docId` 空间：第 k 片包含全局 `docId` `[k*metaShardDocs, (k+1)*metaShardDocs)`（最后一片可能不足）。
 
-### Header（固定 16 字节）
+### Header（固定 20 字节）
 
 | 字段 | 类型 | 说明 |
 |---|---:|---|
 | magic | `4 bytes` | 固定 `ZMHm` |
-| version | `uint16` | 固定 `4` |
+| version | `uint16` | 固定 `5` |
 | sepCode | `uint16` | 列表分隔符（默认 `\u001F`） |
 | count | `uint32` | 本分片文档数 |
+| tagWordCount | `uint32` | 每条文档的 tag bitset 由多少个 `uint32` 组成 |
 | coverBaseCount | `uint32` | cover base 去重后的条目数 |
 
 ### Body 布局（按顺序紧密排列，部分段后 align4）
@@ -79,17 +80,26 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 按顺序：
 
 1) `idsDeltaVarint`: 漫画真实 `id` 的 delta-varint 序列（`prev` 初值为 `0`，写完后 `align4`）
-2) `tagLo: uint32[count]`：标签 bitset 低 32 位
-3) `tagHi: uint16[count]`：标签 bitset 高 16 位（对应全局 bit 32..47）
-4) `flags: uint8[count]`：状态位（之后 `align4`）
-5) `titlesPool(count)`：标题字符串池（之后 `align4`）
-6) `coverBasePool(coverBaseCount)`：cover base 字符串池（之后 `align4`）
-7) `coverBaseIds: uint8[count]` 或 `uint16[count]`：每条文档指向 cover base 的索引（之后 `align4`）
-8) `coverPathsPool(count)`：cover path 字符串池（之后 `align4`）
-9) `authorIds`: `offsets:uint32[count+1] + pool:uint16[]`（作者 ID 列表池；offset 以字节计，之后 `align4`）
-10) `aliasesPool(count)`：别名列表字符串池（之后 `align4`）
+2) `tagBits: uint32[count * tagWordCount]`：标签 bitset，按文档顺序平铺；每条文档占 `tagWordCount` 个 `uint32`
+3) `flags: uint8[count]`：状态位（之后 `align4`）
+4) `titlesPool(count)`：标题字符串池（之后 `align4`）
+5) `coverBasePool(coverBaseCount)`：cover base 字符串池（之后 `align4`）
+6) `coverBaseIds: uint8[count]` 或 `uint16[count]`：每条文档指向 cover base 的索引（之后 `align4`）
+7) `coverPathsPool(count)`：cover path 字符串池（之后 `align4`）
+8) `authorIds`: `offsets:uint32[count+1] + pool:uint16[]`（作者 ID 列表池；offset 以字节计，之后 `align4`）
+9) `aliasesPool(count)`：别名列表字符串池（之后 `align4`）
 
 其中 `xxxPool(n)` 都是：`offsets:uint32[n+1] + pool:uint8[offsets[n]]`。
+
+### tag bitset 编码
+
+- `tagWordCount = ceil(tagCount / 32)`
+- tag 的全局 bit 仍由 `tags.json` 中的 `bit` 字段定义
+- 对任意 tag bit：
+  - `wordIndex = bit >>> 5`
+  - `bitOffset = bit & 31`
+  - `mask = 1 << bitOffset`
+- 单条文档的 tag words 连续存放在 `tagBits[docId * tagWordCount ... (docId + 1) * tagWordCount)`，因此不再受固定 `50` 或 `64` 个 tag 上限约束
 
 ### flags 位定义
 
@@ -99,7 +109,6 @@ function decodeString(pool: Uint8Array, offsets: Uint32Array, index: number): st
 | 1 | `isHideChapter` |
 | 2 | `needLogin`（或不可读） |
 | 3 | `isLock` |
-| 4-5 | 高位标签扩展位（对应全局 bit 48..49） |
 
 ### coverBaseIds 的编码
 
@@ -115,8 +124,8 @@ export type MetaBin = {
   count: number;
   sep: string;
   ids: Int32Array;
-  tagLo: Uint32Array;
-  tagHi: Uint16Array;
+  tagWordCount: number;
+  tagBits: Uint32Array;
   flags: Uint8Array;
   titlesOffsets: Uint32Array;
   titlesPool: Uint8Array;
@@ -131,9 +140,9 @@ export type MetaBin = {
   aliasesPool: Uint8Array;
 };
 
-function parseMetaBinV4(buf: ArrayBuffer): MetaBin {
+function parseMetaBinV5(buf: ArrayBuffer): MetaBin {
   const u8 = new Uint8Array(buf);
-  if (u8.length < 16) throw new Error("meta 文件过小");
+  if (u8.length < 20) throw new Error("meta 文件过小");
   // "ZMHm"
   if (u8[0] !== 90 || u8[1] !== 77 || u8[2] !== 72 || u8[3] !== 109) {
     throw new Error("meta magic 不匹配");
@@ -141,13 +150,14 @@ function parseMetaBinV4(buf: ArrayBuffer): MetaBin {
 
   const view = new DataView(buf);
   const version = view.getUint16(4, true);
-  if (version !== 4) throw new Error(`meta version 不支持：${version}`);
+  if (version !== 5) throw new Error(`meta version 不支持：${version}`);
 
   const sepCode = view.getUint16(6, true);
   const count = view.getUint32(8, true);
-  const coverBaseCount = view.getUint32(12, true);
+  const tagWordCount = view.getUint32(12, true);
+  const coverBaseCount = view.getUint32(16, true);
 
-  let off = 16;
+  let off = 20;
   const ids = new Int32Array(count);
   let prevId = 0;
   for (let i = 0; i < count; i += 1) {
@@ -165,10 +175,8 @@ function parseMetaBinV4(buf: ArrayBuffer): MetaBin {
     ids[i] = prevId;
   }
   off = align4(off);
-  const tagLo = new Uint32Array(buf, off, count);
-  off += count * 4;
-  const tagHi = new Uint16Array(buf, off, count);
-  off += count * 2;
+  const tagBits = new Uint32Array(buf, off, count * tagWordCount);
+  off += count * tagWordCount * 4;
   const flags = new Uint8Array(buf, off, count);
   off += count;
   off = align4(off);
@@ -214,8 +222,8 @@ function parseMetaBinV4(buf: ArrayBuffer): MetaBin {
     count,
     sep: String.fromCharCode(sepCode),
     ids,
-    tagLo,
-    tagHi,
+    tagWordCount,
+    tagBits,
     flags,
     titlesOffsets: titles.offsets,
     titlesPool: titles.pool,

@@ -33,7 +33,9 @@ npm run build:index
 默认会：
 - 将 `meta-lite` 按固定条目数分片（写入 `manifest.json` 的 `assets.metaShards`），用于“高频小增量更新”时避免全量下载。
 - 将 `ngram.index` 按 tokenKey 哈希固定分片（写入 `manifest.json` 的 `assets.indexShards`），前端会按需下载并在网络条件允许时后台预热。
-- `meta-lite` 使用 v4 格式：将 `cover` 拆为「base + path」，作者改为 `authorId` 列表（作者名放在独立 `authors.dict`），`id` 使用 delta-varint 进一步压缩。
+- `meta-lite` 使用 v5 格式：将 `cover` 拆为「base + path」，作者改为 `authorId` 列表（作者名放在独立 `authors.dict`），`id` 使用 delta-varint 进一步压缩，tag bitset 改为按 `uint32` 位块动态编码，不再受 `50` 个 tag 上限约束。
+
+若从旧版 `meta-lite v4` 升级，请重新生成整套 `public/assets/`，并与前端代码一起发布。
 
 如需关闭/调整分片，可传参：
 ```bash

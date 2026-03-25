@@ -75,8 +75,8 @@ type MetaBin = {
   count: number;
   sep: string;
   ids: Int32Array;
-  tagLo: Uint32Array;
-  tagHi: Uint16Array;
+  tagWordCount: number;
+  tagBits: Uint32Array;
   flags: Uint8Array;
   titlesOffsets: Uint32Array;
   titlesPool: Uint8Array;
@@ -330,20 +330,21 @@ function align4(offset: number): number {
 
 function parseMetaBin(buf: ArrayBuffer): MetaBin {
   const u8 = new Uint8Array(buf);
-  if (u8.length < 16) throw new Error("meta 文件过小");
+  if (u8.length < 20) throw new Error("meta 文件过小");
   if (u8[0] !== 90 || u8[1] !== 77 || u8[2] !== 72 || u8[3] !== 109) {
     throw new Error("meta magic 不匹配");
   }
 
   const view = new DataView(buf);
   const version = view.getUint16(4, true);
-  if (version !== 4) throw new Error(`meta version 不支持：${version}`);
+  if (version !== 5) throw new Error(`meta version 不支持：${version}`);
 
   const sepCode = view.getUint16(6, true);
   const count = view.getUint32(8, true);
-  const coverBaseCount = view.getUint32(12, true);
+  const tagWordCount = view.getUint32(12, true);
+  const coverBaseCount = view.getUint32(16, true);
 
-  let off = 16;
+  let off = 20;
   const ids = new Int32Array(count);
   let prevId = 0;
   for (let i = 0; i < count; i += 1) {
@@ -363,10 +364,8 @@ function parseMetaBin(buf: ArrayBuffer): MetaBin {
   }
   off = align4(off);
 
-  const tagLo = new Uint32Array(buf, off, count);
-  off += count * 4;
-  const tagHi = new Uint16Array(buf, off, count);
-  off += count * 2;
+  const tagBits = new Uint32Array(buf, off, count * tagWordCount);
+  off += count * tagWordCount * 4;
   const flags = new Uint8Array(buf, off, count);
   off += count;
   off = align4(off);
@@ -418,8 +417,8 @@ function parseMetaBin(buf: ArrayBuffer): MetaBin {
     count,
     sep: String.fromCharCode(sepCode),
     ids,
-    tagLo,
-    tagHi,
+    tagWordCount,
+    tagBits,
     flags,
     titlesOffsets: titles.offsets,
     titlesPool: titles.pool,
@@ -509,8 +508,8 @@ type LoadedState = {
   metaShardMask: number;
   metaShards: MetaBin[];
   metaIds: Int32Array;
-  metaTagLo: Uint32Array;
-  metaTagHi: Uint16Array;
+  metaTagWordCount: number;
+  metaTagBits: Uint32Array;
   metaFlags: Uint8Array;
   tags: TagInfo[];
   tagByBit: TagBrief[];
@@ -524,6 +523,8 @@ type LoadedState = {
   touched: number[];
   cache: { key: string; docIds: Int32Array } | null;
 };
+
+type TagWordMask = Array<{ wordIndex: number; mask: number }>;
 
 let state: LoadedState | null = null;
 
@@ -626,32 +627,32 @@ function shouldPreloadIndex(): boolean {
   return true;
 }
 
+function docTagWord(s: LoadedState, docId: number, wordIndex: number): number {
+  if (wordIndex < 0 || wordIndex >= s.metaTagWordCount) return 0;
+  const offset = docId * s.metaTagWordCount + wordIndex;
+  return s.metaTagBits[offset] ?? 0;
+}
+
 function passesFilters(
   s: LoadedState,
   docId: number,
-  selectedLo: number,
-  selectedHi: number,
-  selectedEx: number,
-  excludedLo: number,
-  excludedHi: number,
-  excludedEx: number,
+  selectedTags: TagWordMask,
+  excludedTags: TagWordMask,
   hidden: FilterMode,
   hideChapter: FilterMode,
   needLogin: FilterMode,
   lock: FilterMode,
 ): boolean {
-  if (selectedLo !== 0 || selectedHi !== 0) {
-    if (((s.metaTagLo[docId] ?? 0) & selectedLo) !== selectedLo) return false;
-    if (((s.metaTagHi[docId] ?? 0) & selectedHi) !== selectedHi) return false;
+  for (const { wordIndex, mask } of selectedTags) {
+    const word = docTagWord(s, docId, wordIndex);
+    if (((word & mask) >>> 0) !== mask) return false;
   }
-  if (excludedLo !== 0 && ((s.metaTagLo[docId] ?? 0) & excludedLo) !== 0) return false;
-  if (excludedHi !== 0 && ((s.metaTagHi[docId] ?? 0) & excludedHi) !== 0) return false;
+  for (const { wordIndex, mask } of excludedTags) {
+    const word = docTagWord(s, docId, wordIndex);
+    if (((word & mask) >>> 0) !== 0) return false;
+  }
 
   const f = s.metaFlags[docId] ?? 0;
-  const docTagEx = (f >>> 4) & 0b11;
-  if (selectedEx !== 0 && (docTagEx & selectedEx) !== selectedEx) return false;
-  if (excludedEx !== 0 && (docTagEx & excludedEx) !== 0) return false;
-
   if (hidden !== "any") {
     const isHidden = (f & 1) !== 0;
     if (hidden === "only0" && isHidden) return false;
@@ -681,32 +682,25 @@ function splitList(text: string, sep: string): string[] {
   return text.split(sep).filter(Boolean);
 }
 
-function maskFromBits(bits: number[]): { lo: number; hi: number; ex: number } {
-  let lo = 0;
-  let hi = 0;
-  let ex = 0;
+function maskFromBits(bits: number[]): TagWordMask {
+  const words = new Map<number, number>();
   for (const bit of bits) {
     if (bit < 0) continue;
-    if (bit < 32) lo |= 1 << bit;
-    else if (bit < 48) hi |= 1 << (bit - 32);
-    else if (bit < 50) ex |= 1 << (bit - 48);
+    const wordIndex = bit >>> 5;
+    const mask = (words.get(wordIndex) ?? 0) | (1 << (bit & 31));
+    words.set(wordIndex, mask >>> 0);
   }
-  return { lo, hi, ex };
+  return [...words.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([wordIndex, mask]) => ({ wordIndex, mask }));
 }
 
-function tagsFromMask(tagByBit: LoadedState["tagByBit"], lo: number, hi: number, ex: number): TagBrief[] {
+function tagsFromDoc(s: LoadedState, docId: number): TagBrief[] {
   const out: TagBrief[] = [];
-  for (let bit = 0; bit < tagByBit.length; bit += 1) {
-    const on =
-      bit < 32
-        ? ((lo >>> bit) & 1) === 1
-        : bit < 48
-          ? ((hi >>> (bit - 32)) & 1) === 1
-          : bit < 50
-            ? ((ex >>> (bit - 48)) & 1) === 1
-            : false;
-    if (!on) continue;
-    const tag = tagByBit[bit];
+  for (let bit = 0; bit < s.tagByBit.length; bit += 1) {
+    const word = docTagWord(s, docId, bit >>> 5);
+    if (((word >>> (bit & 31)) & 1) !== 1) continue;
+    const tag = s.tagByBit[bit];
     if (tag) out.push(tag);
   }
   return out;
@@ -780,7 +774,6 @@ function buildItem(s: LoadedState, docId: number): SearchResultItem {
 
   const aliasesText = decodeString(shard.aliasesPool, shard.aliasesOffsets, localDocId);
   const authors = decodeAuthorNames(shard, localDocId, s.authorNameById);
-  const tagEx = (f >>> 4) & 0b11;
 
   return {
     id: s.metaIds[docId] ?? 0,
@@ -788,7 +781,7 @@ function buildItem(s: LoadedState, docId: number): SearchResultItem {
     cover,
     aliases: splitList(aliasesText, s.metaSep),
     authors,
-    tags: tagsFromMask(s.tagByBit, s.metaTagLo[docId] ?? 0, s.metaTagHi[docId] ?? 0, tagEx),
+    tags: tagsFromDoc(s, docId),
     hidden,
     isHideChapter,
     needLogin,
@@ -889,8 +882,10 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
   const queryTokens = qNorm ? uniqNgrams(qNorm, s.dict.n) : [];
   const qKey = `${includeTerms.join(" ")}|-${excludeTerms.join(" ")}`;
 
-  const { lo: selectedLo, hi: selectedHi, ex: selectedEx } = maskFromBits(msg.tagBits);
-  const { lo: excludedLo, hi: excludedHi, ex: excludedEx } = maskFromBits(msg.excludeTagBits);
+  const selectedTags = maskFromBits(msg.tagBits);
+  const excludedTags = maskFromBits(msg.excludeTagBits);
+  const selectedTagKey = msg.tagBits.join(",");
+  const excludedTagKey = msg.excludeTagBits.join(",");
   const hasQuery = includeTerms.length > 0 || excludeTerms.length > 0;
 
   const size = Math.max(1, Math.min(100, msg.size | 0));
@@ -899,7 +894,7 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
 
   const items: SearchResultItem[] = [];
 
-  const cacheKey = `${msg.sort}|${msg.hidden}|${msg.hideChapter}|${msg.needLogin}|${msg.lock}|${selectedLo},${selectedHi},${selectedEx}|${excludedLo},${excludedHi},${excludedEx}|${qKey}`;
+  const cacheKey = `${msg.sort}|${msg.hidden}|${msg.hideChapter}|${msg.needLogin}|${msg.lock}|${selectedTagKey}|${excludedTagKey}|${qKey}`;
   const cached = s.cache;
   if (cached?.key === cacheKey) {
     const total = cached.docIds.length;
@@ -913,12 +908,8 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
 
   if (!hasQuery) {
     if (
-      selectedLo === 0 &&
-      selectedHi === 0 &&
-      selectedEx === 0 &&
-      excludedLo === 0 &&
-      excludedHi === 0 &&
-      excludedEx === 0 &&
+      selectedTags.length === 0 &&
+      excludedTags.length === 0 &&
       msg.hidden === "any" &&
       msg.hideChapter === "any" &&
       msg.needLogin === "any" &&
@@ -943,12 +934,8 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
           !passesFilters(
             s,
             docId,
-            selectedLo,
-            selectedHi,
-            selectedEx,
-            excludedLo,
-            excludedHi,
-            excludedEx,
+            selectedTags,
+            excludedTags,
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
@@ -965,12 +952,8 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
           !passesFilters(
             s,
             docId,
-            selectedLo,
-            selectedHi,
-            selectedEx,
-            excludedLo,
-            excludedHi,
-            excludedEx,
+            selectedTags,
+            excludedTags,
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
@@ -1001,12 +984,8 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
           !passesFilters(
             s,
             docId,
-            selectedLo,
-            selectedHi,
-            selectedEx,
-            excludedLo,
-            excludedHi,
-            excludedEx,
+            selectedTags,
+            excludedTags,
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
@@ -1024,12 +1003,8 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
           !passesFilters(
             s,
             docId,
-            selectedLo,
-            selectedHi,
-            selectedEx,
-            excludedLo,
-            excludedHi,
-            excludedEx,
+            selectedTags,
+            excludedTags,
             msg.hidden,
             msg.hideChapter,
             msg.needLogin,
@@ -1084,12 +1059,8 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
             !passesFilters(
               s,
               docId,
-              selectedLo,
-              selectedHi,
-              selectedEx,
-              excludedLo,
-              excludedHi,
-              excludedEx,
+              selectedTags,
+              excludedTags,
               msg.hidden,
               msg.hideChapter,
               msg.needLogin,
@@ -1209,12 +1180,8 @@ function searchSync(s: LoadedState, msg: WorkerSearchMsg, parsed?: ParsedQuery):
         !passesFilters(
           s,
           docId,
-          selectedLo,
-          selectedHi,
-          selectedEx,
-          excludedLo,
-          excludedHi,
-          excludedEx,
+          selectedTags,
+          excludedTags,
           msg.hidden,
           msg.hideChapter,
           msg.needLogin,
@@ -1367,28 +1334,35 @@ async function init(): Promise<void> {
   }
 
   const metaIds = new Int32Array(totalCount);
-  const metaTagLo = new Uint32Array(totalCount);
-  const metaTagHi = new Uint16Array(totalCount);
   const metaFlags = new Uint8Array(totalCount);
 
   const metaShards: MetaBin[] = [];
+  let metaTagWordCount = 0;
   let off = 0;
   let metaSep = "";
   for (const buf of metaBufs) {
     const shard = parseMetaBin(buf);
     if (!metaSep) metaSep = shard.sep;
     if (metaSep !== shard.sep) throw new Error("meta 分片 sep 不一致");
+    if (metaTagWordCount === 0) metaTagWordCount = shard.tagWordCount;
+    if (metaTagWordCount !== shard.tagWordCount) throw new Error("meta 分片 tagWordCount 不一致");
     if (off + shard.count > totalCount) throw new Error("meta 分片条目数溢出");
-
-    metaIds.set(shard.ids, off);
-    metaTagLo.set(shard.tagLo, off);
-    metaTagHi.set(shard.tagHi, off);
-    metaFlags.set(shard.flags, off);
 
     metaShards.push(shard);
     off += shard.count;
   }
   if (off !== totalCount) throw new Error(`meta 分片条目数不匹配：${off} != ${totalCount}`);
+
+  const metaTagBits = new Uint32Array(totalCount * metaTagWordCount);
+  off = 0;
+  for (const shard of metaShards) {
+    metaIds.set(shard.ids, off);
+    metaFlags.set(shard.flags, off);
+    if (metaTagWordCount > 0 && shard.count > 0) {
+      metaTagBits.set(shard.tagBits, off * metaTagWordCount);
+    }
+    off += shard.count;
+  }
 
   const shift = shardShiftForDocs(metaShardDocs);
   const mask = shift === null ? 0 : (metaShardDocs - 1) | 0;
@@ -1402,8 +1376,8 @@ async function init(): Promise<void> {
     metaShardMask: mask,
     metaShards,
     metaIds,
-    metaTagLo,
-    metaTagHi,
+    metaTagWordCount,
+    metaTagBits,
     metaFlags,
     tags,
     tagByBit,

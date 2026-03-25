@@ -141,14 +141,18 @@ def _split_cover_url(raw: str) -> Tuple[str, str]:
     return ("https://" + host, "/" + rest)
 
 
+def _tag_word_count(tag_count: int) -> int:
+    return (max(tag_count, 0) + 31) // 32
+
+
 def _pack_meta_bin(
     ids: List[int],
     titles: List[str],
     covers: List[str],
     author_id_lists: List[List[int]],
     alias_texts: List[str],
-    tag_lo: List[int],
-    tag_hi: List[int],
+    tag_words: List[List[int]],
+    tag_word_count: int,
     flags: List[int],
     sep: str,
 ) -> bytes:
@@ -158,11 +162,12 @@ def _pack_meta_bin(
         and len(covers) == count
         and len(author_id_lists) == count
         and len(alias_texts) == count
-        and len(tag_lo) == count
-        and len(tag_hi) == count
+        and len(tag_words) == count
         and len(flags) == count
     ):
         raise RuntimeError("meta 字段长度不一致")
+    if any(len(words) != tag_word_count for words in tag_words):
+        raise RuntimeError("meta tagWords 行长度不一致")
 
     cover_bases = [""]
     cover_base_idx = {"": 0}
@@ -181,8 +186,8 @@ def _pack_meta_bin(
     idx_bytes = 1 if base_count <= 0xFF else 2
 
     out = bytearray()
-    # meta v4：header 的最后一个 uint32 复用为 coverBaseCount
-    out.extend(struct.pack("<4sHHII", b"ZMHm", 4, ord(sep), count, base_count))
+    # meta v5：显式写入 tagWordCount 与 coverBaseCount
+    out.extend(struct.pack("<4sHHIII", b"ZMHm", 5, ord(sep), count, tag_word_count, base_count))
 
     # ids 使用 delta + varint（prev 初值 0）
     prev_id = 0
@@ -194,14 +199,12 @@ def _pack_meta_bin(
         prev_id = comic_id
     _pad4(out)
 
-    lo_arr = array("I", tag_lo)
-    hi_arr = array("H", tag_hi)
-    if lo_arr.itemsize != 4:
+    words_arr = array("I")
+    for words in tag_words:
+        words_arr.extend(words)
+    if words_arr.itemsize != 4:
         raise RuntimeError("array('I') itemsize != 4")
-    if hi_arr.itemsize != 2:
-        raise RuntimeError("array('H') itemsize != 2")
-    out.extend(lo_arr.tobytes())
-    out.extend(hi_arr.tobytes())
+    out.extend(words_arr.tobytes())
 
     out.extend(bytes(flags))
     _pad4(out)
@@ -366,9 +369,6 @@ def _collect_tags(conn: sqlite3.Connection) -> List[TagInfo]:
             tag_count_by_id[tag_id] = tag_count_by_id.get(tag_id, 0) + 1
 
     tag_ids = sorted(tag_count_by_id.keys())
-    if len(tag_ids) > 50:
-        raise RuntimeError(f"tag 种类过多（{len(tag_ids)}），当前实现仅支持 <= 50")
-
     infos: List[TagInfo] = []
     for bit, tag_id in enumerate(tag_ids):
         infos.append(
@@ -398,14 +398,14 @@ def _build(
 ) -> Tuple[List[bytes], List[bytes], bytes, bytes, dict, dict]:
     tags = _collect_tags(conn)
     tag_bit_by_id = {t.tag_id: t.bit for t in tags}
+    tag_word_count = _tag_word_count(len(tags))
 
     ids: List[int] = []
     titles: List[str] = []
     covers: List[str] = []
     author_id_lists: List[List[int]] = []
     alias_texts: List[str] = []
-    tag_lo: List[int] = []
-    tag_hi: List[int] = []
+    tag_words: List[List[int]] = []
     flags: List[int] = []
     author_name_by_id: Dict[int, str] = {}
 
@@ -444,9 +444,7 @@ def _build(
         aliases = [a for a in (obj.get("aliases") or []) if isinstance(a, str) and a]
         tag_items = obj.get("types") or []
 
-        mask_lo = 0
-        mask_hi = 0
-        mask_ex = 0
+        doc_tag_words = [0] * tag_word_count
         for t in tag_items:
             tag_id = t.get("tag_id")
             if not isinstance(tag_id, int):
@@ -454,14 +452,8 @@ def _build(
             bit = tag_bit_by_id.get(tag_id)
             if bit is None:
                 continue
-            if bit < 32:
-                mask_lo |= 1 << bit
-            elif bit < 48:
-                mask_hi |= 1 << (bit - 32)
-            elif bit < 50:
-                mask_ex |= 1 << (bit - 48)
-            else:
-                raise RuntimeError(f"tag bit 超出可编码范围：{bit}")
+            word_index = bit >> 5
+            doc_tag_words[word_index] |= 1 << (bit & 31)
 
         raw_hidden = obj.get("hidden")
         try:
@@ -508,7 +500,6 @@ def _build(
             | ((hide_chapter & 1) << 1)
             | ((need_login & 1) << 2)
             | ((is_lock & 1) << 3)
-            | ((mask_ex & 0b11) << 4)
         )
 
         ids.append(comic_id)
@@ -516,8 +507,7 @@ def _build(
         covers.append(cover)
         author_id_lists.append(author_ids)
         alias_texts.append(LIST_SEP.join(aliases))
-        tag_lo.append(mask_lo)
-        tag_hi.append(mask_hi)
+        tag_words.append(doc_tag_words)
         flags.append(f)
 
         grams = set()
@@ -591,15 +581,15 @@ def _build(
                 covers=covers[start:end],
                 author_id_lists=author_id_lists[start:end],
                 alias_texts=alias_texts[start:end],
-                tag_lo=tag_lo[start:end],
-                tag_hi=tag_hi[start:end],
+                tag_words=tag_words[start:end],
+                tag_word_count=tag_word_count,
                 flags=flags[start:end],
                 sep=LIST_SEP,
             )
         )
 
     stats = {
-        "version": 5,
+        "version": 6,
         "count": len(ids),
         "authorDictCount": len(author_name_by_id),
         "uniqueTokens": len(entries_v3),

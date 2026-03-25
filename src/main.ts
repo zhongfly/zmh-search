@@ -237,8 +237,8 @@ const toastTextEl = qs<HTMLDivElement>('[data-role="toastText"]');
 const loadingOverlayEl = qs<HTMLDivElement>('[data-role="loadingOverlay"]');
 const loadingStageEl = qs<HTMLDivElement>('[data-role="loadingStage"]');
 
-const STORAGE_KEY_SELECTED_TAG_BITS = "zmh-search:selectedTagBits:v1";
-const STORAGE_KEY_EXCLUDED_TAG_BITS = "zmh-search:excludedTagBits:v1";
+const STORAGE_KEY_SELECTED_TAG_IDS = "zmh-search:selectedTagIds:v2";
+const STORAGE_KEY_EXCLUDED_TAG_IDS = "zmh-search:excludedTagIds:v2";
 const STORAGE_KEY_UI_SETTINGS = "zmh-search:uiSettings:v1";
 
 let tags: TagInfo[] = [];
@@ -265,44 +265,61 @@ let lastSearchMs: PerfMs = null;
 
 const autoLoadSupported = "IntersectionObserver" in window;
 
-function loadBits(key: string): number[] {
+function loadStoredInts(key: string): number[] {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((x) => Number.isInteger(x))
-      .map((x) => Number(x))
-      .filter((x) => x >= 0 && x < 64);
+    return parsed.filter((x) => Number.isInteger(x)).map((x) => Number(x)).filter((x) => x >= 0);
   } catch {
     return [];
   }
 }
 
-function saveBits(key: string, values: Iterable<number>): void {
+function saveStoredInts(key: string, values: Iterable<number>): void {
   try {
-    const bits = [...values].sort((a, b) => a - b);
-    localStorage.setItem(key, JSON.stringify(bits));
+    const items = [...values].sort((a, b) => a - b);
+    localStorage.setItem(key, JSON.stringify(items));
   } catch {
     // ignore
   }
 }
 
-function loadSelectedTagBits(): number[] {
-  return loadBits(STORAGE_KEY_SELECTED_TAG_BITS);
+function loadSelectedTagIds(): number[] {
+  return loadStoredInts(STORAGE_KEY_SELECTED_TAG_IDS);
 }
 
-function loadExcludedTagBits(): number[] {
-  return loadBits(STORAGE_KEY_EXCLUDED_TAG_BITS);
+function loadExcludedTagIds(): number[] {
+  return loadStoredInts(STORAGE_KEY_EXCLUDED_TAG_IDS);
 }
 
-function saveSelectedTagBits(): void {
-  saveBits(STORAGE_KEY_SELECTED_TAG_BITS, selectedTagBits.values());
+function tagIdsFromBits(bits: Iterable<number>): number[] {
+  const tagIdByBit = new Map(tags.map((t) => [t.bit, t.tagId] as const));
+  const out: number[] = [];
+  for (const bit of bits) {
+    const tagId = tagIdByBit.get(bit);
+    if (tagId !== undefined) out.push(tagId);
+  }
+  return out;
 }
 
-function saveExcludedTagBits(): void {
-  saveBits(STORAGE_KEY_EXCLUDED_TAG_BITS, excludedTagBits.values());
+function restoreStoredTagBits(target: Set<number>, tagIds: number[], blocked?: Set<number>): void {
+  const bitByTagId = new Map(tags.map((t) => [t.tagId, t.bit] as const));
+  for (const tagId of tagIds) {
+    const bit = bitByTagId.get(tagId);
+    if (bit === undefined) continue;
+    if (blocked?.has(bit)) continue;
+    target.add(bit);
+  }
+}
+
+function saveSelectedTagIds(): void {
+  saveStoredInts(STORAGE_KEY_SELECTED_TAG_IDS, tagIdsFromBits(selectedTagBits.values()));
+}
+
+function saveExcludedTagIds(): void {
+  saveStoredInts(STORAGE_KEY_EXCLUDED_TAG_IDS, tagIdsFromBits(excludedTagBits.values()));
 }
 
 function loadUiSettings(): Partial<{
@@ -716,15 +733,8 @@ worker.onmessage = (ev: MessageEvent<WorkerOutMsg>) => {
 
     selectedTagBits.clear();
     excludedTagBits.clear();
-    const availableBits = new Set(tags.map((t) => t.bit));
-    for (const bit of loadSelectedTagBits()) {
-      if (availableBits.has(bit)) selectedTagBits.add(bit);
-    }
-    for (const bit of loadExcludedTagBits()) {
-      if (!availableBits.has(bit)) continue;
-      if (selectedTagBits.has(bit)) continue;
-      excludedTagBits.add(bit);
-    }
+    restoreStoredTagBits(selectedTagBits, loadSelectedTagIds());
+    restoreStoredTagBits(excludedTagBits, loadExcludedTagIds(), selectedTagBits);
 
     setEnabled(true);
     renderTags();
@@ -856,8 +866,8 @@ clearTagsBtn.addEventListener("click", () => {
   if (selectedTagBits.size === 0 && excludedTagBits.size === 0) return;
   selectedTagBits.clear();
   excludedTagBits.clear();
-  saveSelectedTagBits();
-  saveExcludedTagBits();
+  saveSelectedTagIds();
+  saveExcludedTagIds();
   renderTags();
   doSearch(1);
 });
@@ -877,8 +887,8 @@ tagList.addEventListener("click", (e) => {
     selectedTagBits.add(bit);
     excludedTagBits.delete(bit);
   }
-  saveSelectedTagBits();
-  saveExcludedTagBits();
+  saveSelectedTagIds();
+  saveExcludedTagIds();
   renderTags();
   doSearch(1);
 });
@@ -909,8 +919,8 @@ resultsEl.addEventListener("click", async (e) => {
     qInput.value = author;
     selectedTagBits.clear();
     excludedTagBits.clear();
-    saveSelectedTagBits();
-    saveExcludedTagBits();
+    saveSelectedTagIds();
+    saveExcludedTagIds();
     renderTags();
     updateClearQBtn();
     doSearch(1);
@@ -928,8 +938,8 @@ resultsEl.addEventListener("click", async (e) => {
     selectedTagBits.clear();
     excludedTagBits.clear();
     selectedTagBits.add(tag.bit);
-    saveSelectedTagBits();
-    saveExcludedTagBits();
+    saveSelectedTagIds();
+    saveExcludedTagIds();
     renderTags();
     updateClearQBtn();
     doSearch(1);
