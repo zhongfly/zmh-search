@@ -2,18 +2,225 @@
 @tailwind components;
 @tailwind utilities;
 
-html {
-  font-family:
-    Inter,
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    Segoe UI,
-    Roboto,
-    Arial,
-    "Noto Sans",
-    "PingFang SC",
-    "Hiragino Sans GB",
-    "Microsoft YaHei",
-    sans-serif;
+@layer base {
+  html {
+    font-family:
+      Inter,
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      Segoe UI,
+      Roboto,
+      Arial,
+      "Noto Sans",
+      "PingFang SC",
+      "Hiragino Sans GB",
+      "Microsoft YaHei",
+      sans-serif;
+  }
+
+  body {
+    @apply min-h-screen bg-paper text-ink antialiased dark:bg-ink dark:text-paper;
+  }
+
+  ::selection {
+    @apply bg-gold/30 text-ink dark:bg-gold/40 dark:text-paper;
+  }
+
+  button:not(:disabled),
+  a {
+    cursor: pointer;
+  }
+}
+
+@layer components {
+  .zmh-page {
+    @apply mx-auto w-full max-w-7xl px-4 py-7 sm:px-6 lg:px-8;
+  }
+
+  .zmh-panel {
+    @apply rounded-xl border border-heritage/20 bg-paper-panel/95 backdrop-blur dark:border-paper/10 dark:bg-heritage/30;
+    box-shadow: 0 18px 44px -34px rgba(31, 58, 61, 0.68);
+  }
+
+  .zmh-control {
+    @apply h-10 rounded-lg border border-heritage/20 bg-paper-panel px-3 text-sm text-ink outline-none transition duration-150 placeholder:text-heritage-muted/60 focus:border-heritage focus:ring-4 focus:ring-gold/20 disabled:bg-paper disabled:text-heritage-muted/50 dark:border-paper/10 dark:bg-ink dark:text-paper dark:placeholder:text-paper/40 dark:focus:border-gold dark:focus:ring-gold/20 dark:disabled:bg-heritage/20 dark:disabled:text-paper/30;
+  }
+
+  .zmh-search-input {
+    @apply h-12 w-full rounded-lg border border-heritage/20 bg-paper-panel px-4 pr-11 text-[15px] text-ink outline-none transition duration-150 placeholder:text-heritage-muted/60 focus:border-heritage focus:ring-4 focus:ring-gold/20 disabled:bg-paper disabled:text-heritage-muted/50 dark:border-paper/10 dark:bg-ink dark:text-paper dark:placeholder:text-paper/40 dark:focus:border-gold dark:focus:ring-gold/20 dark:disabled:bg-heritage/20 dark:disabled:text-paper/30;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  }
+
+  .zmh-primary-button {
+    @apply h-12 rounded-lg bg-heritage px-5 text-sm font-semibold text-paper transition-colors duration-150 hover:bg-heritage-dark focus:outline-none focus:ring-4 focus:ring-gold/30 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gold dark:text-ink dark:hover:bg-gold-light dark:focus:ring-gold/30;
+    box-shadow: 0 14px 28px -18px rgba(31, 58, 61, 0.9);
+  }
+
+  .zmh-subtle-button {
+    @apply text-xs font-semibold text-heritage underline-offset-4 transition-colors duration-150 hover:text-heritage-dark hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-gold-light dark:hover:text-paper;
+  }
+
+  .zmh-icon-button {
+    @apply rounded-md p-1.5 text-heritage-muted transition-colors duration-150 hover:bg-heritage/10 hover:text-heritage-dark focus:outline-none focus:ring-4 focus:ring-gold/20 disabled:opacity-50 dark:text-paper/60 dark:hover:bg-paper/10 dark:hover:text-paper dark:focus:ring-gold/20;
+  }
+
+  .zmh-view-toggle {
+    @apply inline-flex h-10 items-center rounded-lg border border-heritage/20 bg-paper-panel p-0.5 dark:border-paper/10 dark:bg-ink;
+  }
+
+  .zmh-view-button {
+    @apply h-8 rounded-md px-3 text-xs font-semibold text-heritage-muted transition-colors duration-150 hover:bg-heritage/10 hover:text-heritage-dark focus:outline-none focus:ring-4 focus:ring-gold/20 disabled:cursor-not-allowed disabled:opacity-50 dark:text-paper/60 dark:hover:bg-paper/10 dark:hover:text-paper dark:focus:ring-gold/20;
+  }
+
+  .zmh-view-button-active {
+    @apply bg-heritage text-paper shadow-sm hover:bg-heritage hover:text-paper dark:bg-gold dark:text-ink dark:hover:bg-gold dark:hover:text-ink;
+  }
+
+  .zmh-results-grid {
+    @apply grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4;
+  }
+
+  .zmh-results-list {
+    @apply flex flex-col gap-3;
+  }
+
+  .zmh-result-card {
+    @apply overflow-hidden rounded-xl border border-heritage/20 bg-paper-panel transition duration-150 hover:border-heritage/70 dark:border-paper/10 dark:bg-heritage/25 dark:hover:border-gold/70;
+    box-shadow: 0 14px 34px -30px rgba(31, 58, 61, 0.76);
+  }
+
+  .zmh-result-card:hover {
+    box-shadow:
+      0 22px 48px -34px rgba(31, 58, 61, 0.92),
+      0 0 0 2px rgba(182, 138, 53, 0.18);
+  }
+
+  .zmh-result-card-body {
+    @apply p-2.5;
+  }
+
+  .zmh-result-content {
+    @apply min-w-0;
+  }
+
+  .zmh-result-title-row {
+    @apply flex items-start gap-2;
+  }
+
+  .zmh-result-title {
+    @apply min-w-0 flex-1;
+  }
+
+  .zmh-inline-id-button {
+    @apply hidden shrink-0 rounded-md bg-heritage px-2 py-0.5 text-[11px] font-semibold leading-5 text-paper transition-colors duration-150 hover:bg-heritage-dark focus:outline-none focus:ring-4 focus:ring-gold/25 dark:bg-gold dark:text-ink dark:hover:bg-gold-light dark:focus:ring-gold/20;
+  }
+
+  .zmh-results-grid .zmh-result-content {
+    @apply mt-3;
+  }
+
+  .zmh-results-list .zmh-result-card {
+    @apply rounded-lg;
+  }
+
+  .zmh-results-list .zmh-result-card-body {
+    @apply flex items-start gap-3 p-3;
+  }
+
+  .zmh-results-list .zmh-result-cover {
+    @apply w-20 shrink-0 sm:w-24;
+  }
+
+  .zmh-results-list .zmh-result-content {
+    @apply flex-1 py-0.5;
+  }
+
+  .zmh-results-list .zmh-cover-id-button {
+    @apply hidden;
+  }
+
+  .zmh-results-list .zmh-inline-id-button {
+    @apply inline-flex items-center;
+  }
+
+  .zmh-chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-heritage/20 bg-paper-panel px-2.5 py-1 text-xs leading-none text-heritage transition-colors duration-150 hover:border-heritage/40 hover:bg-paper focus:outline-none focus:ring-4 focus:ring-gold/20 dark:border-paper/10 dark:bg-ink dark:text-paper/75 dark:hover:border-gold/40 dark:hover:bg-paper/10 dark:focus:ring-gold/20;
+  }
+
+  .zmh-chip-selected {
+    @apply border-heritage/40 bg-heritage/10 text-heritage-dark hover:border-heritage/60 hover:bg-heritage/10 dark:border-gold/40 dark:bg-gold/10 dark:text-gold-light dark:hover:bg-gold/20;
+  }
+
+  .zmh-chip-excluded {
+    @apply border-rose-200 bg-rose-50 text-rose-900 hover:bg-rose-100 dark:border-rose-400/40 dark:bg-rose-500/15 dark:text-rose-100 dark:hover:bg-rose-500/20;
+  }
+
+  .zmh-status-chip {
+    @apply inline-flex items-center rounded-full border border-heritage/20 bg-paper px-2 py-0.5 text-[11px] leading-5 text-heritage-muted dark:border-paper/10 dark:bg-ink dark:text-paper/50;
+  }
+
+  .zmh-link-chip {
+    @apply inline-flex items-center rounded-full bg-heritage/10 px-2 py-0.5 text-xs text-heritage transition-colors duration-150 hover:bg-heritage/20 focus:outline-none focus:ring-4 focus:ring-gold/20 dark:bg-paper/10 dark:text-paper/75 dark:hover:bg-paper/20 dark:focus:ring-gold/20;
+  }
+
+  .zmh-tag-link-chip {
+    @apply inline-flex items-center rounded-full bg-gold/10 px-2 py-0.5 text-xs text-heritage-dark transition-colors duration-150 hover:bg-gold/20 focus:outline-none focus:ring-4 focus:ring-gold/20 dark:bg-gold/20 dark:text-gold-light dark:hover:bg-gold/20 dark:focus:ring-gold/20;
+  }
+
+  .zmh-empty-state {
+    @apply rounded-xl border border-dashed border-heritage/25 bg-paper-panel/70 dark:border-paper/20 dark:bg-heritage/20;
+  }
+
+  .zmh-cover-shell {
+    @apply relative overflow-hidden rounded-lg bg-heritage/10 dark:bg-ink;
+  }
+
+  .zmh-cover-aspect {
+    @apply aspect-[3/4] w-full;
+  }
+
+  .zmh-results-message {
+    @apply col-span-full;
+  }
+
+  .zmh-tag-list {
+    @apply flex min-w-0 flex-1 flex-wrap gap-2;
+  }
+
+  .zmh-tag-list-collapsed {
+    @apply h-[1.875rem] overflow-hidden;
+  }
+
+  .zmh-more-button {
+    @apply h-[1.875rem] shrink-0 rounded-full border border-heritage/20 bg-paper-panel px-3 text-xs font-semibold text-heritage transition-colors duration-150 hover:border-heritage/40 hover:bg-paper hover:text-heritage-dark focus:outline-none focus:ring-4 focus:ring-gold/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-paper/10 dark:bg-ink dark:text-gold-light dark:hover:border-gold/40 dark:hover:bg-paper/10 dark:focus:ring-gold/20;
+  }
+
+  .zmh-back-top-button {
+    @apply pointer-events-none fixed bottom-5 right-5 z-50 inline-flex h-11 w-11 translate-y-2 items-center justify-center rounded-full border border-heritage/20 bg-paper-panel/95 text-heritage opacity-0 shadow-lg backdrop-blur transition duration-150 hover:border-heritage/40 hover:bg-paper hover:text-heritage-dark focus:outline-none focus:ring-4 focus:ring-gold/25 dark:border-paper/10 dark:bg-ink/90 dark:text-gold-light dark:hover:border-gold/40 dark:hover:bg-heritage dark:hover:text-paper dark:focus:ring-gold/20 sm:bottom-6 sm:right-6 sm:h-12 sm:w-12;
+  }
+
+  .zmh-back-top-button-visible {
+    @apply pointer-events-auto translate-y-0 opacity-100;
+  }
+}
+
+.zmh-line-clamp-2 {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zmh-result-card,
+  .zmh-primary-button,
+  .zmh-chip,
+  .zmh-link-chip,
+  .zmh-tag-link-chip,
+  .zmh-icon-button,
+  .zmh-view-button,
+  .zmh-back-top-button {
+    transition-duration: 0.01ms;
+  }
 }
