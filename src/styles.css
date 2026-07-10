@@ -218,7 +218,20 @@
   animation-timing-function: ease-in-out;
 }
 
+.zmh-cover-img {
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.zmh-cover-img.zmh-cover-loaded {
+  opacity: 1;
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .zmh-cover-img {
+    transition-duration: 0.01ms;
+  }
+
   .zmh-result-card,
   .zmh-primary-button,
   .zmh-chip,

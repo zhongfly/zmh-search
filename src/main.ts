@@ -772,7 +772,7 @@ function renderResultCard(it: WorkerResultsMsg["items"][number]): string {
               <img
                 src="${coverEscaped}"
                 alt="${titleEscaped}"
-                class="h-full w-full object-cover"
+                class="zmh-cover-img h-full w-full object-cover"
                 loading="lazy"
                 referrerpolicy="no-referrer"
               />
@@ -837,8 +837,44 @@ function renderResultCard(it: WorkerResultsMsg["items"][number]): string {
   `;
 }
 
+const COVER_FALLBACK_HTML = `<div class="flex h-full w-full items-center justify-center text-xs text-heritage-muted/60 dark:text-paper/40" aria-hidden="true">无封面</div>`;
+
+function markCoverFailed(img: HTMLImageElement): void {
+  const shell = img.closest(".zmh-cover-aspect");
+  if (shell) shell.innerHTML = COVER_FALLBACK_HTML;
+}
+
+resultsEl.addEventListener(
+  "load",
+  (e) => {
+    const img = e.target as HTMLElement;
+    if (img instanceof HTMLImageElement && img.classList.contains("zmh-cover-img")) {
+      img.classList.add("zmh-cover-loaded");
+    }
+  },
+  true,
+);
+resultsEl.addEventListener(
+  "error",
+  (e) => {
+    const img = e.target as HTMLElement;
+    if (img instanceof HTMLImageElement && img.classList.contains("zmh-cover-img")) {
+      markCoverFailed(img);
+    }
+  },
+  true,
+);
+
+function hydrateCovers(): void {
+  for (const img of resultsEl.querySelectorAll<HTMLImageElement>("img.zmh-cover-img:not(.zmh-cover-loaded)")) {
+    if (!img.complete) continue;
+    if (img.naturalWidth > 0) img.classList.add("zmh-cover-loaded");
+    else markCoverFailed(img);
+  }
+}
+
 function updateResultControls(): void {
-  resultMetaEl.textContent = `已显示 ${currentItems.length} 条（共 ${currentTotalMatches} 条）`;
+  resultMetaEl.textContent = `已显示 ${currentItems.length.toLocaleString()} 条（共 ${currentTotalMatches.toLocaleString()} 条）`;
   if (currentHasMore && !autoLoadSupported) loadMoreBtn.classList.remove("hidden");
   else loadMoreBtn.classList.add("hidden");
   loadMoreBtn.disabled = false;
@@ -847,15 +883,21 @@ function updateResultControls(): void {
 
 function appendResults(items: WorkerResultsMsg["items"]): void {
   if (items.length > 0) resultsEl.insertAdjacentHTML("beforeend", items.map(renderResultCard).join(""));
+  hydrateCovers();
   updateResultControls();
 }
 
 function renderResults(): void {
   if (currentItems.length === 0) {
+    const idle = shouldSkipSearch(getParams());
+    const title = idle ? "开始搜索" : "没有匹配的漫画";
+    const hint = idle
+      ? "输入关键词（至少 2 个字符），或选择标签和筛选条件。"
+      : "换个关键词试试，或调整标签和筛选条件。";
     resultsEl.innerHTML = `
       <div class="zmh-empty-state col-span-full p-6 text-sm">
-        <div class="font-semibold text-ink dark:text-paper">没有匹配的漫画</div>
-        <div class="mt-1 text-xs text-heritage-muted dark:text-paper/50">请输入至少 2 个字符，或调整标签和筛选条件。</div>
+        <div class="font-semibold text-ink dark:text-paper">${title}</div>
+        <div class="mt-1 text-xs text-heritage-muted dark:text-paper/50">${hint}</div>
       </div>
     `;
     resultMetaEl.textContent = "";
@@ -864,6 +906,7 @@ function renderResults(): void {
   }
 
   resultsEl.innerHTML = currentItems.map(renderResultCard).join("");
+  hydrateCovers();
   updateResultControls();
 }
 
@@ -934,19 +977,19 @@ function setStatusReady(): void {
   const perfText = perf.length > 0 ? `，${perf.join("，")}` : "";
 
   if (!generatedAt) {
-    statusEl.textContent = `数据（共 ${totalCount} 条${perfText}）`;
+    statusEl.textContent = `数据（共 ${totalCount.toLocaleString()} 条${perfText}）`;
     return;
   }
   try {
     const dt = new Date(generatedAt);
     if (!Number.isNaN(dt.getTime())) {
-      statusEl.textContent = `数据：${dt.toLocaleString()}（共 ${totalCount} 条${perfText}）`;
+      statusEl.textContent = `数据：${dt.toLocaleString()}（共 ${totalCount.toLocaleString()} 条${perfText}）`;
       return;
     }
   } catch {
     // ignore
   }
-  statusEl.textContent = `数据：${generatedAt}（共 ${totalCount} 条${perfText}）`;
+  statusEl.textContent = `数据：${generatedAt}（共 ${totalCount.toLocaleString()} 条${perfText}）`;
 }
 
 worker.onmessage = (ev: MessageEvent<WorkerOutMsg>) => {
