@@ -7,15 +7,15 @@ if (!app) throw new Error("找不到 #app");
 
 app.innerHTML = `
   <main class="zmh-page">
-    <header class="mb-5 flex flex-col gap-3 border-b border-heritage/15 pb-5 dark:border-paper/10 sm:flex-row sm:items-end sm:justify-between">
+    <header class="mb-4 flex flex-col gap-2.5 border-b border-heritage/15 pb-4 dark:border-paper/10 sm:mb-5 sm:flex-row sm:items-end sm:justify-between sm:gap-3 sm:pb-5">
       <div>
-        <h1 class="text-2xl font-bold text-ink dark:text-paper">再漫画搜索</h1>
-        <p class="mt-2 max-w-2xl text-xs leading-5 text-heritage-muted dark:text-paper/60">
+        <h1 class="text-xl font-bold text-ink dark:text-paper sm:text-2xl">再漫画搜索</h1>
+        <p class="mt-1 max-w-2xl text-[11px] leading-4 text-heritage-muted dark:text-paper/60 sm:mt-2 sm:text-xs sm:leading-5">
           本网站与再漫画官方无关，仅用于学习研究，漫画信息仅供参考，可能与实际不符
         </p>
       </div>
-      <div class="flex items-center gap-2">
-        <div class="rounded-full border border-heritage/20 bg-paper-panel/90 px-3 py-1.5 text-xs font-medium text-heritage-muted shadow-sm dark:border-paper/10 dark:bg-heritage/25 dark:text-paper/60" aria-live="polite" data-role="status">
+      <div class="flex items-center justify-between gap-2 sm:justify-end">
+        <div class="rounded-full border border-heritage/20 bg-paper-panel/90 px-3 py-1.5 text-[11px] font-medium leading-4 text-heritage-muted shadow-sm dark:border-paper/10 dark:bg-heritage/25 dark:text-paper/60 sm:text-xs sm:leading-5" aria-live="polite" data-role="status">
           正在初始化…
         </div>
         <div class="zmh-view-toggle shrink-0" role="group" aria-label="主题" data-role="themeToggle">
@@ -53,14 +53,6 @@ app.innerHTML = `
               </button>
             </div>
           </label>
-
-          <button
-            class="zmh-primary-button"
-            data-role="searchBtn"
-            disabled
-          >
-            搜索
-          </button>
         </div>
 
         <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -257,7 +249,6 @@ const hiddenSelect = qs<HTMLSelectElement>('[data-role="hidden"]');
 const hideChapterSelect = qs<HTMLSelectElement>('[data-role="hideChapter"]');
 const needLoginSelect = qs<HTMLSelectElement>('[data-role="needLogin"]');
 const lockSelect = qs<HTMLSelectElement>('[data-role="lock"]');
-const searchBtn = qs<HTMLButtonElement>('[data-role="searchBtn"]');
 const tagList = qs<HTMLDivElement>('[data-role="tagList"]');
 const toggleTagsBtn = qs<HTMLButtonElement>('[data-role="toggleTags"]');
 const toggleTagsTextEl = toggleTagsBtn.querySelector<HTMLSpanElement>('[data-role="toggleTagsText"]');
@@ -661,7 +652,6 @@ function setEnabled(enabled: boolean): void {
     hideChapterSelect,
     needLoginSelect,
     lockSelect,
-    searchBtn,
     viewListBtn,
     viewGridBtn,
   ]) {
@@ -1171,7 +1161,6 @@ clearQBtn.addEventListener("click", () => {
   qInput.focus();
   doSearch(1);
 });
-searchBtn.addEventListener("click", () => doSearch(1));
 viewListBtn.addEventListener("click", () => applyResultViewMode("list", true));
 viewGridBtn.addEventListener("click", () => applyResultViewMode("grid", true));
 sortSelect.addEventListener("change", () => {
