@@ -14,8 +14,15 @@ app.innerHTML = `
           本网站与再漫画官方无关，仅用于学习研究，漫画信息仅供参考，可能与实际不符
         </p>
       </div>
-      <div class="rounded-full border border-heritage/20 bg-paper-panel/90 px-3 py-1.5 text-xs font-medium text-heritage-muted shadow-sm dark:border-paper/10 dark:bg-heritage/25 dark:text-paper/60" aria-live="polite" data-role="status">
-        正在初始化…
+      <div class="flex items-center gap-2">
+        <div class="rounded-full border border-heritage/20 bg-paper-panel/90 px-3 py-1.5 text-xs font-medium text-heritage-muted shadow-sm dark:border-paper/10 dark:bg-heritage/25 dark:text-paper/60" aria-live="polite" data-role="status">
+          正在初始化…
+        </div>
+        <div class="zmh-view-toggle shrink-0" role="group" aria-label="主题" data-role="themeToggle">
+          <button class="zmh-view-button whitespace-nowrap" type="button" data-theme="auto">自动</button>
+          <button class="zmh-view-button whitespace-nowrap" type="button" data-theme="light">浅色</button>
+          <button class="zmh-view-button whitespace-nowrap" type="button" data-theme="dark">深色</button>
+        </div>
       </div>
     </header>
 
@@ -270,6 +277,57 @@ const toastTextEl = qs<HTMLDivElement>('[data-role="toastText"]');
 const backTopBtn = qs<HTMLButtonElement>('[data-role="backTop"]');
 const loadingOverlayEl = qs<HTMLDivElement>('[data-role="loadingOverlay"]');
 const loadingStageEl = qs<HTMLDivElement>('[data-role="loadingStage"]');
+const themeToggleBtn = qs<HTMLDivElement>('[data-role="themeToggle"]');
+
+const STORAGE_KEY_THEME = "zmh-search:theme:v1";
+type ThemeMode = "auto" | "light" | "dark";
+const darkMedia = window.matchMedia("(prefers-color-scheme: dark)");
+
+function loadThemeMode(): ThemeMode {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_THEME);
+    if (raw === "light" || raw === "dark") return raw;
+  } catch {
+    // ignore
+  }
+  return "auto";
+}
+
+let themeMode: ThemeMode = loadThemeMode();
+
+function applyTheme(): void {
+  const dark = themeMode === "dark" || (themeMode === "auto" && darkMedia.matches);
+  const update = () => document.documentElement.classList.toggle("dark", dark);
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // ponytail: 原生 View Transitions 做主题交叉淡入，不支持的浏览器直接切换
+  if (!reduceMotion && dark !== document.documentElement.classList.contains("dark") && document.startViewTransition) {
+    document.startViewTransition(update);
+  } else {
+    update();
+  }
+  for (const btn of themeToggleBtn.querySelectorAll<HTMLButtonElement>("button[data-theme]")) {
+    const active = btn.dataset.theme === themeMode;
+    btn.classList.toggle("zmh-view-button-active", active);
+    btn.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+}
+
+themeToggleBtn.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement | null)?.closest<HTMLButtonElement>("button[data-theme]");
+  if (!btn) return;
+  themeMode = btn.dataset.theme as ThemeMode;
+  try {
+    if (themeMode === "auto") localStorage.removeItem(STORAGE_KEY_THEME);
+    else localStorage.setItem(STORAGE_KEY_THEME, themeMode);
+  } catch {
+    // ignore
+  }
+  applyTheme();
+});
+darkMedia.addEventListener("change", () => {
+  if (themeMode === "auto") applyTheme();
+});
+applyTheme();
 
 const STORAGE_KEY_SELECTED_TAG_IDS = "zmh-search:selectedTagIds:v2";
 const STORAGE_KEY_EXCLUDED_TAG_IDS = "zmh-search:excludedTagIds:v2";
