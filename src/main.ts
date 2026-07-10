@@ -526,6 +526,55 @@ if (restoredSettings.hideChapter) hideChapterSelect.value = restoredSettings.hid
 if (restoredSettings.needLogin) needLoginSelect.value = restoredSettings.needLogin;
 if (restoredSettings.lock) lockSelect.value = restoredSettings.lock;
 
+function parseIdList(raw: string | null): number[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((x) => Number(x))
+    .filter((x) => Number.isInteger(x) && x >= 0);
+}
+
+const initialUrlParams = new URLSearchParams(location.search);
+const urlTagIds = parseIdList(initialUrlParams.get("tags"));
+const urlExcludedTagIds = parseIdList(initialUrlParams.get("xtags"));
+const urlHasTagState = initialUrlParams.has("tags") || initialUrlParams.has("xtags");
+{
+  const q = initialUrlParams.get("q");
+  if (q) qInput.value = q;
+  const sort = initialUrlParams.get("sort");
+  if (sort === "relevance" || sort === "id_desc" || sort === "id_asc") sortSelect.value = sort;
+  for (const [key, select] of [
+    ["hidden", hiddenSelect],
+    ["hideChapter", hideChapterSelect],
+    ["needLogin", needLoginSelect],
+    ["lock", lockSelect],
+  ] as const) {
+    const v = initialUrlParams.get(key);
+    if (v === "any" || v === "only0" || v === "only1") select.value = v;
+  }
+}
+
+function syncUrl(): void {
+  const params = new URLSearchParams();
+  const q = qInput.value.trim();
+  if (q) params.set("q", q);
+  if (sortSelect.value !== "relevance") params.set("sort", sortSelect.value);
+  for (const [key, select] of [
+    ["hidden", hiddenSelect],
+    ["hideChapter", hideChapterSelect],
+    ["needLogin", needLoginSelect],
+    ["lock", lockSelect],
+  ] as const) {
+    if (select.value !== "any") params.set(key, select.value);
+  }
+  const tagIds = tagIdsFromBits(selectedTagBits.values()).sort((a, b) => a - b);
+  const xtagIds = tagIdsFromBits(excludedTagBits.values()).sort((a, b) => a - b);
+  if (tagIds.length > 0) params.set("tags", tagIds.join(","));
+  if (xtagIds.length > 0) params.set("xtags", xtagIds.join(","));
+  const qs = params.toString();
+  history.replaceState(null, "", qs ? `?${qs}` : location.pathname);
+}
+
 function maybeAutoLoadMore(): void {
   if (!autoLoadSupported) return;
   if (!currentHasMore) return;
@@ -1009,8 +1058,15 @@ worker.onmessage = (ev: MessageEvent<WorkerOutMsg>) => {
 
     selectedTagBits.clear();
     excludedTagBits.clear();
-    restoreStoredTagBits(selectedTagBits, loadSelectedTagIds());
-    restoreStoredTagBits(excludedTagBits, loadExcludedTagIds(), selectedTagBits);
+    if (urlHasTagState) {
+      restoreStoredTagBits(selectedTagBits, urlTagIds);
+      restoreStoredTagBits(excludedTagBits, urlExcludedTagIds, selectedTagBits);
+      saveSelectedTagIds();
+      saveExcludedTagIds();
+    } else {
+      restoreStoredTagBits(selectedTagBits, loadSelectedTagIds());
+      restoreStoredTagBits(excludedTagBits, loadExcludedTagIds(), selectedTagBits);
+    }
 
     setEnabled(true);
     renderTags();
@@ -1056,6 +1112,7 @@ function doSearch(page: number): void {
     loadingMore = false;
     currentHasMore = false;
     currentItems = [];
+    syncUrl();
   }
   if (page === 1 && shouldSkipSearch(params)) {
     currentItems = [];
